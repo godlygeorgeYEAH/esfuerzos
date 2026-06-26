@@ -7,3 +7,5 @@
 * Buscador de Desaparecidos - https://buscador-desaparecidos-vzla.vercel.app/
 * Desaparecidos - https://desaparecidosterremotovenezuela.com/ - FALTA
 * TerremotoVenezuela - https://terremotovenezuela.app/ - FALTA
+* Hospitales en Venezuela - https://hospitalesenvenezuela.com/ - FALTA
+* Red de emergencia - https://redayudavenezuela.com/ - FALTA
