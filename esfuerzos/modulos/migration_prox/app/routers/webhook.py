@@ -1,5 +1,7 @@
 import logging
 import secrets
+import time
+from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from slowapi import Limiter
@@ -8,12 +10,32 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.core.waha_resolver import resolve_negocio
+from app.core.waha_resolver import resolve_operacion
 from app.bot.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
+
+# Deduplicación de eventos por event.id — TTL 30s, máximo 500 entradas
+_SEEN_EVENTS: OrderedDict[str, float] = OrderedDict()
+_DEDUP_TTL = 30
+_DEDUP_MAX = 500
+
+
+def _is_duplicate(event_id: str) -> bool:
+    if not event_id:
+        return False
+    now = time.monotonic()
+    # Limpiar entradas expiradas
+    while _SEEN_EVENTS and next(iter(_SEEN_EVENTS.values())) < now - _DEDUP_TTL:
+        _SEEN_EVENTS.popitem(last=False)
+    if event_id in _SEEN_EVENTS:
+        return True
+    if len(_SEEN_EVENTS) >= _DEDUP_MAX:
+        _SEEN_EVENTS.popitem(last=False)
+    _SEEN_EVENTS[event_id] = now
+    return False
 
 
 @router.post("/waha")
@@ -22,7 +44,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Recibe todos los eventos entrantes desde WAHA.
 
-    Resuelve el negocio destinatario a partir del campo "session" del payload,
+    Resuelve la operación destinataria a partir del campo "session" del payload,
     respetando el modo WAHA_FREE_TIER para desarrollo con una sola sesión.
     Solo procesa eventos de tipo "message" con texto.
     """
@@ -35,20 +57,24 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     payload = await request.json()
 
-    session_name = payload.get("session", "default")
-    negocio = resolve_negocio(session_name, db)
+    event_id = payload.get("id", "")
+    if _is_duplicate(event_id):
+        return {"status": "ignored", "reason": "duplicate_event_id"}
 
-    if negocio is None:
+    session_name = payload.get("session", "default")
+    operacion = resolve_operacion(session_name, db)
+
+    if operacion is None:
         logger.warning(
-            "Mensaje descartado: no se pudo resolver negocio para session='%s'.", session_name
+            "Mensaje descartado: no se pudo resolver operación para session='%s'.", session_name
         )
         return {"status": "ignored"}
 
     event = payload.get("event", "unknown")
     logger.info(
-        "WAHA webhook recibido | negocio=%s (id=%d) | session=%s | event=%s",
-        negocio.slug,
-        negocio.id,
+        "WAHA webhook recibido | operacion=%s (id=%d) | session=%s | event=%s",
+        operacion.slug,
+        operacion.id,
         session_name,
         event,
     )
@@ -102,31 +128,9 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         if resolved:
             client_phone = resolved
 
-    # Verificar si el remitente es un conductor activo del negocio
-    from app.models.conductor import Conductor
-    from app.core.conductores import es_respuesta_conductor, procesar_respuesta_conductor
-    from app.core.phone import normalize_phone
-
-    conductor = db.query(Conductor).filter(
-        Conductor.telefono == normalize_phone(client_phone),
-        Conductor.negocio_id == negocio.id,
-        Conductor.is_active == True,
-    ).first()
-
-    if conductor and message_text and es_respuesta_conductor(message_text):
-        respuesta = await procesar_respuesta_conductor(db, conductor, message_text, session_name)
-        if respuesta:
-            from app.services.waha import send_message as waha_send
-            await waha_send(phone=chat_id, message=respuesta, session=session_name)
-        return {"status": "processed_conductor"}
-
-    from app.core.clientes import get_or_create_cliente
-    get_or_create_cliente(db, negocio.id, client_phone)
-    db.commit()
-
     orchestrator = Orchestrator(db)
     response, should_send = await orchestrator.process_message(
-        negocio_id=negocio.id,
+        operacion_id=operacion.id,
         client_phone=client_phone,
         message_text=message_text,
         media_url=media_url,
@@ -136,8 +140,8 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     if should_send and response:
         from app.services.waha import send_message as waha_send
         sent = await waha_send(phone=chat_id, message=response, session=session_name)
-        logger.warning("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        logger.info("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
     else:
-        logger.warning("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
+        logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
 
     return {"status": "processed", "sent": should_send and bool(response)}

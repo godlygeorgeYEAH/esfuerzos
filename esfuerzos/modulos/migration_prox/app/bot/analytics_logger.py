@@ -24,7 +24,7 @@ class AnalyticsLogger:
     def __init__(self, db: Session):
         self.db = db
 
-    def log_intent(self, conversacion_id: int, negocio_id: int, intent_result, latency_ms: int = 0) -> None:
+    def log_intent(self, conversacion_id: int, operacion_id: int, intent_result, latency_ms: int = 0) -> None:
         data = {
             "intent": intent_result.intencion_principal if intent_result else "none",
             "confidence": round(intent_result.confidence, 3) if intent_result else 0.0,
@@ -35,14 +35,14 @@ class AnalyticsLogger:
             "entidades": intent_result.entidades if intent_result else {},
             "latency_ms": latency_ms,
         }
-        self._log("intent_detected", conversacion_id, negocio_id, data)
+        self._log("intent_detected", conversacion_id, operacion_id, data)
         dlog("ANALYTICS LOGGER", "Evento: intent_detected",
              intent=data["intent"], confidence=f"{data['confidence']:.2f}", latency_ms=latency_ms)
 
     def log_decision(
         self,
         conversacion_id: int,
-        negocio_id: int,
+        operacion_id: int,
         current_node: str,
         target_node: str,
         razon: str,
@@ -58,34 +58,32 @@ class AnalyticsLogger:
             "intent_confidence": round(intent_confidence, 3),
             "similarity_confidence": round(similarity_confidence, 3),
         }
-        self._log("decision_made", conversacion_id, negocio_id, data)
+        self._log("decision_made", conversacion_id, operacion_id, data)
         dlog("ANALYTICS LOGGER", "Evento: decision_made",
              de=current_node, a=target_node, razon=razon, metodo=metodo)
 
     def log_response(
         self,
         conversacion_id: int,
-        negocio_id: int,
+        operacion_id: int,
         node_key: str,
         metodo: str,
         response_length: int,
-        abc_applied: bool = False,
     ) -> None:
         data = {
             "node_key": node_key,
             "metodo": metodo,
             "response_length": response_length,
-            "abc_applied": abc_applied,
         }
-        self._log("response_generated", conversacion_id, negocio_id, data)
+        self._log("response_generated", conversacion_id, operacion_id, data)
         dlog("ANALYTICS LOGGER", "Evento: response_generated",
-             nodo=node_key, metodo=metodo, chars=response_length, abc=abc_applied)
+             nodo=node_key, metodo=metodo, chars=response_length)
 
-    def _log(self, event_type: str, conversacion_id: int, negocio_id: int, data: dict) -> None:
+    def _log(self, event_type: str, conversacion_id: int, operacion_id: int, data: dict) -> None:
         try:
             event = EventoConversacion(
                 conversacion_id=conversacion_id,
-                negocio_id=negocio_id,
+                operacion_id=operacion_id,
                 event_type=event_type,
                 data=json.dumps(data),
             )

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # ----------------------------------------------------------------
     waha_url: str = "http://localhost:3000"
     waha_api_key: str = ""
+    waha_session: str = "default"
     waha_webhook_url: str = "http://localhost:8000/webhook/waha"
     waha_free_tier: bool = True          # True = un solo negocio; False = multi-tenant por waha_session
     waha_webhook_secret: str | None = None  # Si se setea, WAHA debe enviar X-WAHA-Token
@@ -53,22 +54,11 @@ class Settings(BaseSettings):
     intent_low_confidence: float = 0.65
 
     # ----------------------------------------------------------------
-    # URLs públicas
+    # Fotos de intake
     # ----------------------------------------------------------------
-    webapp_base_url: str = "http://localhost:4200"  # Link enviado en ver_menu
-    media_base_url: str = "http://localhost:8000"   # Prefijo para URLs de comprobantes
-
-    # ----------------------------------------------------------------
-    # Storage (comprobantes de pago)
-    # ----------------------------------------------------------------
-    storage_backend: str = "local"   # "local" | "s3"
-
-    # S3 / DigitalOcean Spaces (solo si storage_backend=s3)
-    s3_endpoint_url: str = ""
-    s3_access_key: str = ""
-    s3_secret_key: str = ""
-    s3_bucket_name: str = ""
-    s3_public_base_url: str = ""
+    photo_max_count: int = 5          # máximo de fotos por reporte
+    photo_ttl_seconds: int = 60       # segundos sin nueva foto para considerar la sesión cerrada
+    photo_storage_path: str = "media/photos"  # directorio local de descarga
 
     # ----------------------------------------------------------------
     # Entorno
