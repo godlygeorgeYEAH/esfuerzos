@@ -28,8 +28,10 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Seed del flujo conversacional al arrancar la aplicación."""
     try:
-        from app.database import SessionLocal
+        from app.database import SessionLocal, Base, engine
+        from app.models import negocio, bot, reporte  # noqa: F401 — registra en Base
         from app.bot.flow_seeder import seed_default_flow
+        Base.metadata.create_all(engine)
         db = SessionLocal()
         try:
             seed_default_flow(db)
