@@ -10,7 +10,14 @@ El nuevo repo debe integrar estos routers y el lifespan a su propio main.py
 si ya tiene una aplicación FastAPI existente.
 """
 import logging
+import sys
 from contextlib import asynccontextmanager
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stdout,
+)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
