@@ -53,24 +53,6 @@ class Settings(BaseSettings):
     intent_low_confidence: float = 0.65
 
     # ----------------------------------------------------------------
-    # URLs públicas
-    # ----------------------------------------------------------------
-    webapp_base_url: str = "http://localhost:4200"  # Link enviado en ver_menu
-    media_base_url: str = "http://localhost:8000"   # Prefijo para URLs de comprobantes
-
-    # ----------------------------------------------------------------
-    # Storage (comprobantes de pago)
-    # ----------------------------------------------------------------
-    storage_backend: str = "local"   # "local" | "s3"
-
-    # S3 / DigitalOcean Spaces (solo si storage_backend=s3)
-    s3_endpoint_url: str = ""
-    s3_access_key: str = ""
-    s3_secret_key: str = ""
-    s3_bucket_name: str = ""
-    s3_public_base_url: str = ""
-
-    # ----------------------------------------------------------------
     # Entorno
     # ----------------------------------------------------------------
     environment: str = "development"

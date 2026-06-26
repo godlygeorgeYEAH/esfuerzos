@@ -69,17 +69,15 @@ class AnalyticsLogger:
         node_key: str,
         metodo: str,
         response_length: int,
-        abc_applied: bool = False,
     ) -> None:
         data = {
             "node_key": node_key,
             "metodo": metodo,
             "response_length": response_length,
-            "abc_applied": abc_applied,
         }
         self._log("response_generated", conversacion_id, negocio_id, data)
         dlog("ANALYTICS LOGGER", "Evento: response_generated",
-             nodo=node_key, metodo=metodo, chars=response_length, abc=abc_applied)
+             nodo=node_key, metodo=metodo, chars=response_length)
 
     def _log(self, event_type: str, conversacion_id: int, negocio_id: int, data: dict) -> None:
         try:

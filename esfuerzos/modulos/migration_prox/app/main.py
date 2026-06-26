@@ -11,11 +11,8 @@ si ya tiene una aplicación FastAPI existente.
 """
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -59,16 +56,11 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if not settings.is_production else [],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Storage local: crear subdirectorios y montar en /media
-for _subdir in ["comprobantes", "imagenes"]:
-    Path(f"/app/media/{_subdir}").mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory="/app/media"), name="media")
 
 # Webhook WAHA — entrada de mensajes
 app.include_router(webhook.router, prefix="/webhook", tags=["webhook"])

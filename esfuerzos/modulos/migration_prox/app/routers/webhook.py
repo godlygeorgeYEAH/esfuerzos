@@ -102,28 +102,6 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         if resolved:
             client_phone = resolved
 
-    # Verificar si el remitente es un conductor activo del negocio
-    from app.models.conductor import Conductor
-    from app.core.conductores import es_respuesta_conductor, procesar_respuesta_conductor
-    from app.core.phone import normalize_phone
-
-    conductor = db.query(Conductor).filter(
-        Conductor.telefono == normalize_phone(client_phone),
-        Conductor.negocio_id == negocio.id,
-        Conductor.is_active == True,
-    ).first()
-
-    if conductor and message_text and es_respuesta_conductor(message_text):
-        respuesta = await procesar_respuesta_conductor(db, conductor, message_text, session_name)
-        if respuesta:
-            from app.services.waha import send_message as waha_send
-            await waha_send(phone=chat_id, message=respuesta, session=session_name)
-        return {"status": "processed_conductor"}
-
-    from app.core.clientes import get_or_create_cliente
-    get_or_create_cliente(db, negocio.id, client_phone)
-    db.commit()
-
     orchestrator = Orchestrator(db)
     response, should_send = await orchestrator.process_message(
         negocio_id=negocio.id,

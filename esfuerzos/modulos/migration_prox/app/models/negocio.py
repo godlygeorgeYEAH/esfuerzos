@@ -29,15 +29,13 @@ semántica debe ser la misma):
     - direccion         (str | None) — dirección textual del local
 """
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Text, Numeric, func
+from sqlalchemy import String, Boolean, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
 class Negocio(Base):
-    """
-    Entidad tenant. Ajustar campos según el modelo real del nuevo repo.
-    """
+    """Sesión de atención — entidad raíz del sistema multi-tenant."""
     __tablename__ = "negocios"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -46,16 +44,3 @@ class Negocio(Base):
     waha_session: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    # Métodos de pago (JSON arrays/objects)
-    metodos_pago: Mapped[str | None] = mapped_column(Text, nullable=True)
-    datos_pago: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Modalidades de entrega
-    delivery_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    retiro_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    # Ubicación física del negocio
-    negocio_lat: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
-    negocio_lng: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
-    direccion: Mapped[str | None] = mapped_column(String(500), nullable=True)

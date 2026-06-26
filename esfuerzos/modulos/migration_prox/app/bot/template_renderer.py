@@ -47,35 +47,6 @@ def get_nested_value(data: Dict[str, Any], key_path: str) -> Optional[Any]:
     return current
 
 
-def render_articulo_list(articulos: list, template: Optional[str] = None) -> str:
-    """
-    Renderiza una lista de Articulos en formato de texto para WhatsApp.
-
-    Usa los campos del modelo Articulo: nombre, precio, descripcion.
-    """
-    if not articulos:
-        return "No hay artículos disponibles en este momento."
-
-    if template is None:
-        template = "{index}. {nombre} - ${precio}"
-
-    lines = []
-    for idx, articulo in enumerate(articulos, start=1):
-        if hasattr(articulo, '__dict__'):
-            articulo_dict = {
-                'nombre': getattr(articulo, 'nombre', ''),
-                'precio': getattr(articulo, 'precio', 0),
-                'descripcion': getattr(articulo, 'descripcion', None),
-            }
-        else:
-            articulo_dict = articulo
-        articulo_dict['index'] = idx
-        lines.append(render_template(template, articulo_dict))
-
-    return '\n'.join(lines)
-
-
-
 def render_working_hours(start_time, end_time, working_days: list, template: Optional[str] = None) -> str:
     """Renderiza información de horarios de trabajo."""
     day_translation = {
@@ -124,25 +95,6 @@ def render_working_hours(start_time, end_time, working_days: list, template: Opt
         return f"{days_text} de {start_formatted} a {end_formatted}"
 
     return render_template(template, {'days': days_text, 'start_time': start_formatted, 'end_time': end_formatted})
-
-
-def render_payment_methods(payment_methods: list) -> str:
-    """Renderiza lista de métodos de pago."""
-    if not payment_methods:
-        return "Efectivo"
-    method_translation = {
-        'cash': 'Efectivo', 'zelle': 'Zelle', 'paypal': 'PayPal',
-        'bank_transfer': 'Transferencia bancaria', 'crypto': 'Criptomonedas',
-        'binance': 'Binance Pay', 'mobile_payment': 'Pago móvil',
-        'efectivo': 'Efectivo', 'transferencia': 'Transferencia bancaria',
-    }
-    methods_es = [method_translation.get(m, m) for m in payment_methods]
-    if len(methods_es) == 1:
-        return methods_es[0]
-    elif len(methods_es) == 2:
-        return f"{methods_es[0]} y {methods_es[1]}"
-    else:
-        return ", ".join(methods_es[:-1]) + f" y {methods_es[-1]}"
 
 
 def add_context_variables(variables: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
