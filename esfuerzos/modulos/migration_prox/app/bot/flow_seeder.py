@@ -115,7 +115,13 @@ DEFAULT_NODES = [
             "Escribe *reporte* en cualquier momento para registrar otro caso."
         ),
         "expected_responses": None,
-        "next_node_map": json.dumps({"reporte": "guia_familiar"}),
+        "next_node_map": json.dumps({
+            "reporte": "guia_familiar",
+            "1": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
+            "default": "bienvenida",
+        }),
     },
 
     # ------------------------------------------------------------------
