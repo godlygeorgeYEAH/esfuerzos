@@ -1,5 +1,7 @@
 import logging
 import secrets
+import time
+from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from slowapi import Limiter
@@ -14,6 +16,26 @@ from app.bot.orchestrator import Orchestrator
 logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
+
+# Deduplicación de eventos por event.id — TTL 30s, máximo 500 entradas
+_SEEN_EVENTS: OrderedDict[str, float] = OrderedDict()
+_DEDUP_TTL = 30
+_DEDUP_MAX = 500
+
+
+def _is_duplicate(event_id: str) -> bool:
+    if not event_id:
+        return False
+    now = time.monotonic()
+    # Limpiar entradas expiradas
+    while _SEEN_EVENTS and next(iter(_SEEN_EVENTS.values())) < now - _DEDUP_TTL:
+        _SEEN_EVENTS.popitem(last=False)
+    if event_id in _SEEN_EVENTS:
+        return True
+    if len(_SEEN_EVENTS) >= _DEDUP_MAX:
+        _SEEN_EVENTS.popitem(last=False)
+    _SEEN_EVENTS[event_id] = now
+    return False
 
 
 @router.post("/waha")
@@ -34,6 +56,10 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     payload = await request.json()
+
+    event_id = payload.get("id", "")
+    if _is_duplicate(event_id):
+        return {"status": "ignored", "reason": "duplicate_event_id"}
 
     session_name = payload.get("session", "default")
     operacion = resolve_operacion(session_name, db)

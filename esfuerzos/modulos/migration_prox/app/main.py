@@ -31,11 +31,36 @@ async def lifespan(app: FastAPI):
         from app.database import SessionLocal, Base, engine
         from app.models import negocio, bot, reporte  # noqa: F401 — registra en Base
         from app.bot.flow_seeder import seed_default_flow
+        from app.models.negocio import Operacion
+        from app.models.bot import BotConfig, OperacionFlow, FlowTemplate
         Base.metadata.create_all(engine)
         db = SessionLocal()
         try:
+            # 1. Flujo
             seed_default_flow(db)
             logger.info("FlowSeeder: flujo por defecto verificado/creado.")
+
+            # 2. Operacion por defecto (idempotente)
+            op = db.query(Operacion).filter_by(slug="reune").first()
+            if not op:
+                op = Operacion(nombre="Reúne", slug="reune", waha_session=settings.waha_session, is_active=True)
+                db.add(op)
+                db.flush()
+                logger.info("Operacion 'reune' creada (id=%d).", op.id)
+
+            # 3. BotConfig (idempotente)
+            if not db.query(BotConfig).filter_by(operacion_id=op.id).first():
+                db.add(BotConfig(operacion_id=op.id, is_bot_active=True, enable_intent_detection=False))
+                logger.info("BotConfig creado para operacion_id=%d.", op.id)
+
+            # 4. OperacionFlow (idempotente)
+            if not db.query(OperacionFlow).filter_by(operacion_id=op.id).first():
+                flow = db.query(FlowTemplate).filter_by(is_system_default=True).first()
+                if flow:
+                    db.add(OperacionFlow(operacion_id=op.id, flow_template_id=flow.id, is_active=True))
+                    logger.info("OperacionFlow vinculado (operacion=%d, flow=%d).", op.id, flow.id)
+
+            db.commit()
         finally:
             db.close()
     except Exception as e:

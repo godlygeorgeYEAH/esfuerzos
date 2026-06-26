@@ -40,9 +40,6 @@ services:
     environment:
       WHATSAPP_DEFAULT_ENGINE: WEBJS
       WAHA_API_KEY: ${WAHA_API_KEY:-}
-      # Envía todos los eventos de mensaje al bot
-      WHATSAPP_HOOK_URL: http://bot:8000/webhook/waha
-      WHATSAPP_HOOK_EVENTS: message,message.any
     volumes:
       - waha_sessions:/app/.wwebjs_auth
       - waha_media:/app/.media
