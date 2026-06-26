@@ -45,7 +45,7 @@ WAHA → POST /webhook/waha
        ├─ verificaciones (bloqueado, bot activo, horario)
        ├─ obtener/crear Conversacion
        ├─ guardar mensaje cliente
-       ├─ interceptar pedir_foto   → _handle_pedir_foto (TTL + descarga)
+       ├─ interceptar pedir_foto   → _handle_pedir_foto (keyword "listo" + descarga)
        ├─ similarity matching      → next_node_map (sin LLM)
        ├─ Decision Engine          → nodo destino
        ├─ intake hooks             → commit_report() al llegar a reporte_guardado
@@ -60,7 +60,7 @@ WAHA → POST /webhook/waha
 |---|---|---|
 | `bienvenida` | greeting | Selección de perfil 1/2/3 |
 | `guia_familiar` | intake_guide | Pide datos en un mensaje |
-| `pedir_foto` | intake_photo | Acumula fotos por TTL o max |
+| `pedir_foto` | intake_photo | Acumula fotos; avanza con "listo" o al llegar al máximo (5) |
 | `notas_adicionales` | intake_notes | Notas libres; cierra el reporte |
 | `reporte_guardado` | intake_saved | Confirmación. Llama `commit_report` |
 | `guia_rescatista` | placeholder | Pendiente |
@@ -88,7 +88,6 @@ WAHA_WEBHOOK_URL=http://tu-servidor/webhook/waha
 WAHA_FREE_TIER=true
 PHOTO_STORAGE_PATH=media/photos
 PHOTO_MAX_COUNT=5
-PHOTO_TTL_SECONDS=60
 ```
 
 ### 2. Provisionar la base de datos
@@ -216,25 +215,28 @@ db.close()"
 
 ---
 
-### Paso 4 — Sesión multi-foto con TTL
+### Paso 4 — Sesión multi-foto con keyword "listo"
 
 ```bash
 # Foto 1
-send "{\"session\":\"default\",\"event\":\"message\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"\",\"hasMedia\":true,\"mediaUrl\":\"http://example.com/foto1.jpg\"}}"
-# Esperado: "Imagen recibida (1/5)"
+send "{\"session\":\"default\",\"event\":\"message\",\"id\":\"t4a\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"\",\"hasMedia\":true,\"mediaUrl\":\"http://example.com/foto1.jpg\"}}"
+# Esperado: "📸 Imagen recibida (1/5). Escribe *listo* cuando termines."
 
 # Foto 2
-send "{\"session\":\"default\",\"event\":\"message\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"\",\"hasMedia\":true,\"mediaUrl\":\"http://example.com/foto2.jpg\"}}"
-# Esperado: "Imagen recibida (2/5)"
+send "{\"session\":\"default\",\"event\":\"message\",\"id\":\"t4b\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"\",\"hasMedia\":true,\"mediaUrl\":\"http://example.com/foto2.jpg\"}}"
+# Esperado: "📸 Imagen recibida (2/5). Escribe *listo* cuando termines."
 
-# Texto antes del TTL → debe quedar en pedir_foto
-send "{\"session\":\"default\",\"event\":\"message\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"ok\",\"hasMedia\":false}}"
-# Esperado: "Aún puedes enviar más fotos"
+# Texto que no es "listo" → queda en pedir_foto
+send "{\"session\":\"default\",\"event\":\"message\",\"id\":\"t4c\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"ya terminé\",\"hasMedia\":false}}"
+# Esperado: "⏳ Tienes 2/5 foto(s). Puedes enviar más o escribe *listo*."
 
-# Esperar TTL y avanzar
-sleep 65
-send "{\"session\":\"default\",\"event\":\"message\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"ok\",\"hasMedia\":false}}"
+# "listo" → avanza a notas_adicionales
+send "{\"session\":\"default\",\"event\":\"message\",\"id\":\"t4d\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"listo\",\"hasMedia\":false}}"
 # Esperado: notas_adicionales
+
+# Variante: "listo" sin fotos también avanza
+send "{\"session\":\"default\",\"event\":\"message\",\"id\":\"t4e\",\"payload\":{\"from\":\"$PHONE\",\"fromMe\":false,\"body\":\"listo\",\"hasMedia\":false}}"
+# Esperado: notas_adicionales (reportes sin foto son válidos)
 ```
 
 ---
@@ -282,7 +284,7 @@ EOF
 | 4 | `kind="found"` | `commit_report` siempre crea `kind="missing"`. Sin flujo `found` activo, los reportes de personas encontradas no se registran. |
 | 5 | Parseo robusto | `parse_person_data` espera CSV estricto (`nombre, género, edad, ubicación`). No tolera variantes como "34 años" o separadores alternativos. Evaluar LLM o regex más flexible. |
 | 6 | Descarga WAHA con API key | `_download_photo` no envía `X-Api-Key` al descargar media. Requerido en producción si WAHA tiene auth habilitado. |
-| 7 | TTL en producción | Si el usuario nunca vuelve a escribir, la conversación queda en `pedir_foto` indefinidamente. Requiere tarea periódica (APScheduler o Celery beat) que avance conversaciones varadas. |
+| 7 | Conversaciones varadas | Si el usuario llega a `pedir_foto` y nunca escribe "listo" ni envía más fotos, la conversación queda en ese nodo indefinidamente. Para producción: tarea periódica que archive conversaciones inactivas. |
 | 8 | Respuesta a CONFIRMAR | Tras recibir una notificación de coincidencia, el usuario puede responder `CONFIRMAR`. No hay nodo que maneje ese keyword — cae en fallback. |
 | 9 | Hash vs teléfono en notificaciones | `reporter_wa_hash` es SHA-256 irreversible. El servicio de matching debe obtener el teléfono desde `Conversacion.client_phone` cruzando por hash, o almacenar el `waha_chat_id` en el reporte. |
 | 10 | `.env.example` | Las variables de entorno requeridas no están documentadas en un archivo de ejemplo. Crear antes del primer deploy. |

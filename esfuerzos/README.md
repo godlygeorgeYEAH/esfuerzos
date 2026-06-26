@@ -149,7 +149,7 @@ create index on matches (status);
 - Recibir mensajes de texto e imagen. Las fotos llegan con `hasMedia: true` y una `mediaUrl` directa servida por WAHA.
 - Dos flujos conversacionales de texto guiado: **"Reporto un desaparecido"** y **"Soy rescatista / encontré a alguien"**.
 - Campos recopilados mediante conversación estructurada: nombre, edad, última ubicación, señas, ropa.
-- Fotos múltiples: agrupar mensajes por sesión con clave `reporter_wa_hash` y TTL. El usuario envía "listo" para cerrar la sesión de fotos.
+- Fotos múltiples: el usuario envía fotos y escribe *listo* para cerrar la sesión. El bot avanza automáticamente al llegar a 5 fotos. Los reportes sin fotos son válidos.
 - Sin restricción de ventana de 24h: WAHA permite mensajes libres en cualquier momento.
 
 ### 7.2 Embeddings y gate de calidad
@@ -371,7 +371,7 @@ El módulo `modulos/migration_prox` está operativo. El sistema:
 - Recibe mensajes de WhatsApp vía WAHA y los procesa sin LLM (navegación por `next_node_map`).
 - Guía al usuario por un flujo conversacional: identifica si es familiar de un desaparecido, rescatista u hospital.
 - Recopila datos del reporte (nombre, género, edad, ubicación) en un solo mensaje de texto.
-- Acepta fotos con TTL: se agrupan hasta 5 por conversación y se vinculan al reporte al cerrarse.
+- Acepta fotos (hasta 5); el usuario escribe *listo* para cerrar la sesión. Los reportes sin fotos son válidos.
 - Persiste reportes y fotos en SQLite (desarrollo) con modelos `Report`, `Photo`, `Operacion`, `Conversacion`.
 - Auto-configura la sesión WAHA y el webhook al arrancar.
 - Deduplica eventos WAHA por `event.id` para evitar respuestas dobles.
