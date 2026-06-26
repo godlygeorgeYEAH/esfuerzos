@@ -114,6 +114,13 @@ class Orchestrator:
             operacion_id, client_phone, "client", message_text,
             conversacion_id=conversation.id,
         )
+        logger.info(
+            "[MSG] phone=%s nodo_actual=%-20s msg=%s%s",
+            client_phone,
+            conversation.current_node_key or "—",
+            (message_text or "")[:80],
+            f" [media]" if media_url else "",
+        )
         dlog("ORCHESTRATOR", "Paso 5: Mensaje cliente guardado",
              sender="client",
              texto=message_text,
@@ -300,6 +307,12 @@ class Orchestrator:
             ai_confidence=intent_result.confidence if intent_result else None,
         )
 
+        logger.info(
+            "[BOT] phone=%s %s → %-20s",
+            client_phone,
+            current_node.node_key,
+            next_node.node_key,
+        )
         dlog("ORCHESTRATOR", "FIN", nodo=next_node.node_key, respuesta=response)
         return response, True
 
@@ -337,8 +350,10 @@ class Orchestrator:
                  count=count, max=settings.photo_max_count, local=local_path or "sin descarga")
 
             if count >= settings.photo_max_count:
+                logger.info("[BOT] phone=%s pedir_foto → notas_adicionales (max_alcanzado, fotos=%d)", conversation.client_phone, count)
                 return self._advance_from_foto(conversation, operacion_id, context, count, "max_alcanzado")
 
+            logger.info("[BOT] phone=%s pedir_foto → pedir_foto (foto %d/%d)", conversation.client_phone, count, settings.photo_max_count)
             response = (
                 f"📸 Imagen recibida ({count}/{settings.photo_max_count}).\n"
                 'Puedes enviar más fotos. Escribe *listo* cuando termines.'
@@ -350,8 +365,10 @@ class Orchestrator:
         count = len(pending_photos)
 
         if message_text.strip().lower() == "listo":
+            logger.info("[BOT] phone=%s pedir_foto → notas_adicionales (listo, fotos=%d)", conversation.client_phone, count)
             return self._advance_from_foto(conversation, operacion_id, context, count, "listo")
 
+        logger.info("[BOT] phone=%s pedir_foto → pedir_foto (texto sin listo, fotos=%d)", conversation.client_phone, count)
         response = (
             f"⏳ Tienes {count}/{settings.photo_max_count} foto(s) recibida(s).\n"
             'Puedes enviar más o escribe *listo* para continuar.'
