@@ -1,15 +1,15 @@
 """
-Flow Seeder - Crea el FlowTemplate del sistema por defecto con todos los FlowNodes de Phase 2.
+Flow Seeder — Crea el FlowTemplate de intake de crisis Reúne v1.
 
-Se llama al startup de la aplicación para garantizar que el flujo exista.
-Idempotente: seguro llamarlo en cada arranque.
+Flujo principal:
+  bienvenida → guia_familiar → pedir_foto → notas_adicionales → reporte_guardado
+  bienvenida → guia_rescatista  (placeholder)
+  bienvenida → guia_hospital    (placeholder)
 
-Flujo Phase 2:
-  bienvenida → ver_menu → pedido_recibido (instrucciones completas de pago)
-             → esperar_comprobante → comprobante_recibido
-             → [dashboard] → orden_confirmada | orden_rechazada → esperar_comprobante
-  bienvenida → info_negocio (FAQ: horarios, delivery, pagos)
-  cualquier nodo → fallback
+Navegación: exclusivamente por next_node_map.
+  - Claves exactas (ej. "1", "listo", "reporte") para keywords.
+  - "default" para cualquier texto libre.
+  - Sin expected_responses — el texto del usuario se almacena en contexto.
 """
 import json
 import logging
@@ -21,224 +21,178 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NODES = [
     # ------------------------------------------------------------------
-    # 1. Bienvenida — punto de entrada
+    # 1. Bienvenida — identifica el tipo de usuario
     # ------------------------------------------------------------------
     {
         "node_key": "bienvenida",
         "node_type": "greeting",
         "order_position": 1,
         "message_template": (
-            "¡Hola! 👋 Soy el asistente de *{business_name}*.\n\n"
-            "¿En qué puedo ayudarte?\n"
-            "• Ver menú y hacer un pedido → escribe *menú*\n"
-            "• Información del negocio → escribe *info*"
+            "Hola, soy *Reúne* 🤝\n\n"
+            "Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n"
+            "¿Cuál es tu perfil?\n\n"
+            "*1* — Soy familiar de un desaparecido\n"
+            "*2* — Soy rescatista\n"
+            "*3* — Soy hospital o refugio"
         ),
-        "expected_responses": json.dumps(["menu", "info", "pedido", "quiero pedir", "hola", "buenas"]),
+        "expected_responses": None,
         "next_node_map": json.dumps({
-            "menu|pedido|quiero pedir": "ver_menu",
-            "info": "info_negocio",
+            "1": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
         }),
     },
 
     # ------------------------------------------------------------------
-    # 2. Ver menú — envía link de la webapp
+    # 2. Guía familiar — instrucciones + pide datos en un solo mensaje
     # ------------------------------------------------------------------
     {
-        "node_key": "ver_menu",
-        "node_type": "menu",
+        "node_key": "guia_familiar",
+        "node_type": "intake_guide",
         "order_position": 2,
         "message_template": (
-            "Aquí está nuestro menú 🍽️\n"
-            "{webapp_link}\n\n"
-            "Elige tus platos, arma tu carrito y confírmalo desde la app.\n"
-            "Cuando termines, envíame el número de orden para continuar."
+            "Vamos a registrar el reporte en 3 pasos:\n\n"
+            "*1.* Datos de la persona\n"
+            "*2.* Una o varias fotos\n"
+            "*3.* Notas adicionales (opcional)\n\n"
+            "Envíame en *un solo mensaje*:\n"
+            "› Nombre completo\n"
+            "› Género\n"
+            "› Edad\n"
+            "› Última ubicación conocida\n\n"
+            "_Ejemplo: María García, femenino, 34, Cumaná centro_"
         ),
         "expected_responses": None,
-        "next_node_map": None,
+        "next_node_map": json.dumps({"default": "pedir_foto"}),
     },
 
     # ------------------------------------------------------------------
-    # 3. Pedido recibido — resumen de la orden (opciones de pago van en mensajes separados)
+    # 3. Pedir foto — espera fotos; avanza con "listo"
     # ------------------------------------------------------------------
     {
-        "node_key": "pedido_recibido",
-        "node_type": "order_received",
+        "node_key": "pedir_foto",
+        "node_type": "intake_photo",
         "order_position": 3,
         "message_template": (
-            "¡Recibí tu pedido *#{orden_numero}*! 🎉\n\n"
-            "📋 *Tu pedido:*\n{items_list}\n\n"
-            "🧾 Subtotal: ${subtotal}\n"
-            "{delivery_line}"
-            "💰 *Total: ${total}*\n\n"
-            "Puedes pagar con cualquiera de estos métodos 👇"
+            "✅ Datos recibidos.\n\n"
+            "Ahora envía *una o varias fotos* de la persona.\n"
+            "Cuando termines, escribe *listo*."
         ),
         "expected_responses": None,
-        "next_node_map": None,
+        "next_node_map": json.dumps({
+            "listo": "notas_adicionales",
+            "default": "pedir_foto",
+        }),
     },
 
     # ------------------------------------------------------------------
-    # 4. Esperar comprobante — nodo de espera, se avanza por media
+    # 4. Notas adicionales — señas, ropa; "reporte" inicia uno nuevo
     # ------------------------------------------------------------------
     {
-        "node_key": "esperar_comprobante",
-        "node_type": "awaiting_proof",
+        "node_key": "notas_adicionales",
+        "node_type": "intake_notes",
         "order_position": 4,
         "message_template": (
-            "Estoy esperando tu comprobante de pago 📎\n"
-            "Envíame una captura de pantalla o foto del recibo."
+            "📸 Imágenes recibidas.\n\n"
+            "¿Tienes señas, ropa u otros detalles? Escríbelos ahora.\n\n"
+            "O escribe *reporte* para registrar un nuevo caso."
         ),
         "expected_responses": None,
-        "next_node_map": None,
+        "next_node_map": json.dumps({
+            "reporte": "guia_familiar",
+            "default": "reporte_guardado",
+        }),
     },
 
     # ------------------------------------------------------------------
-    # 5. Comprobante recibido — acuse de recibo, dashboard verifica
+    # 5. Reporte guardado — confirmación final
     # ------------------------------------------------------------------
     {
-        "node_key": "comprobante_recibido",
-        "node_type": "proof_received",
+        "node_key": "reporte_guardado",
+        "node_type": "intake_saved",
         "order_position": 5,
         "message_template": (
-            "✅ ¡Comprobante recibido!\n\n"
-            "Estamos verificando tu pago. En unos minutos te confirmamos.\n"
-            "Gracias por tu pedido en *{business_name}* 🙏"
+            "✅ *Reporte registrado.*\n\n"
+            "Nuestro equipo lo revisará. No confirmaremos coincidencias "
+            "sin verificación humana previa.\n\n"
+            "Escribe *reporte* en cualquier momento para registrar otro caso."
         ),
         "expected_responses": None,
-        "next_node_map": None,
+        "next_node_map": json.dumps({"reporte": "guia_familiar"}),
     },
 
     # ------------------------------------------------------------------
-    # 6. Orden confirmada — enviado proactivamente por el dashboard
+    # 6. Guía rescatista — placeholder
     # ------------------------------------------------------------------
     {
-        "node_key": "orden_confirmada",
-        "node_type": "order_confirmed",
+        "node_key": "guia_rescatista",
+        "node_type": "placeholder",
         "order_position": 6,
         "message_template": (
-            "✅ *¡Pago confirmado!*\n\n"
-            "Tu pedido *#{orden_numero}* está en preparación 🍽️\n\n"
-            "{aviso_siguiente_paso}"
+            "Gracias por tu apoyo 🙏\n\n"
+            "El flujo para rescatistas estará disponible muy pronto.\n"
+            "Un coordinador se pondrá en contacto contigo."
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 7. Orden en camino — enviado proactivamente por el dashboard
+    # 7. Guía hospital — placeholder
     # ------------------------------------------------------------------
     {
-        "node_key": "orden_en_camino",
-        "node_type": "order_on_the_way",
+        "node_key": "guia_hospital",
+        "node_type": "placeholder",
         "order_position": 7,
         "message_template": (
-            "🛵 *¡Tu pedido #{orden_numero} está en camino!*\n\n"
-            "{cliente_referencia_msg}"
-            "Estará contigo en breve. ¡Gracias por elegir *{business_name}*!"
+            "Gracias por contactarnos 🏥\n\n"
+            "El flujo para hospitales y refugios estará disponible muy pronto.\n"
+            "Un coordinador se pondrá en contacto contigo."
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 8. Orden lista para retiro — enviado proactivamente por el dashboard
-    # ------------------------------------------------------------------
-    {
-        "node_key": "orden_lista_retiro",
-        "node_type": "order_ready_pickup",
-        "order_position": 8,
-        "message_template": (
-            "✅ *¡Tu pedido #{orden_numero} está listo para retirar!*\n\n"
-            "📍 *Dirección:* {direccion_negocio}\n\n"
-            "Te esperamos. ¡Gracias por elegir *{business_name}*!"
-        ),
-        "expected_responses": None,
-        "next_node_map": None,
-    },
-
-    # ------------------------------------------------------------------
-    # 9. Orden rechazada — enviado proactivamente por el dashboard
-    # ------------------------------------------------------------------
-    {
-        "node_key": "orden_rechazada",
-        "node_type": "order_rejected",
-        "order_position": 9,
-        "message_template": (
-            "⚠️ No pudimos verificar tu comprobante de pago.\n\n"
-            "Puede ser que la imagen no sea legible o los datos no coincidan.\n"
-            "Por favor envíame un nuevo comprobante para continuar."
-        ),
-        "expected_responses": json.dumps(["ok", "entiendo", "voy", "te mando", "aqui va"]),
-        "next_node_map": json.dumps({"default": "esperar_comprobante"}),
-    },
-
-    # ------------------------------------------------------------------
-    # 10. Info negocio — FAQ: horarios, delivery, pagos
-    # ------------------------------------------------------------------
-    {
-        "node_key": "info_negocio",
-        "node_type": "faq",
-        "order_position": 10,
-        "message_template": (
-            "ℹ️ Información de *{business_name}*\n\n"
-            "🕐 *Horario*: {working_hours}\n"
-            "📍 *Cobertura*: {area_cobertura}\n"
-            "💳 *Métodos de pago*: {payment_methods}\n\n"
-            "¿Quieres ver el menú? Escribe *menú* 😊"
-        ),
-        "expected_responses": json.dumps(["menu", "pedido", "si", "quiero pedir"]),
-        "next_node_map": json.dumps({"menu|pedido|si|quiero pedir": "ver_menu"}),
-    },
-
-    # ------------------------------------------------------------------
-    # 11. Fallback — no entendió el mensaje
+    # 8. Fallback — no entendió; retoma con 1/2/3
     # ------------------------------------------------------------------
     {
         "node_key": "fallback",
         "node_type": "fallback",
-        "order_position": 11,
+        "order_position": 8,
         "message_template": (
-            "No entendí bien tu mensaje 😅\n"
-            "Puedes escribir *menú* para ver nuestros platos,\n"
-            "o *info* para horarios y delivery."
+            "No entendí tu mensaje.\n\n"
+            "Escribe el número de tu perfil:\n"
+            "*1* — Familiar de un desaparecido\n"
+            "*2* — Rescatista\n"
+            "*3* — Hospital o refugio"
         ),
         "expected_responses": None,
-        "next_node_map": None,
-    },
-
-    # ------------------------------------------------------------------
-    # 12. Escalado a humano — problema técnico o solicitud humana
-    # ------------------------------------------------------------------
-    {
-        "node_key": "escalado_humano",
-        "node_type": "human_escalation",
-        "order_position": 12,
-        "message_template": (
-            "Entiendo que estás teniendo problemas con el pago. 🙏\n\n"
-            "Voy a conectarte con uno de nuestros agentes para que te ayuden directamente.\n"
-            "Por favor espera un momento."
-        ),
-        "expected_responses": None,
-        "next_node_map": None,
+        "next_node_map": json.dumps({
+            "1": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
+        }),
     },
 ]
 
 
 def seed_default_flow(db: Session) -> FlowTemplate:
     """
-    Garantiza que el FlowTemplate del sistema exista con todos los nodos requeridos.
-    Crea el template y sus nodos si no existen. Si ya existen, no hace nada.
+    Garantiza que el FlowTemplate de crisis exista con todos sus nodos.
+    Crea o actualiza en cada arranque. Idempotente.
     """
     template = db.query(FlowTemplate).filter(FlowTemplate.is_system_default == True).first()
 
     if not template:
         template = FlowTemplate(
-            name="Flujo Gastronómico Phase 2",
-            description="Flujo conversacional completo: consulta → pedido → pago → comprobante.",
+            name="Flujo de Intake de Crisis — Reúne v1",
+            description="Identifica al usuario y recopila datos del desaparecido o encontrado.",
             is_system_default=True,
         )
         db.add(template)
         db.flush()
-        logger.info(f"FlowSeeder: FlowTemplate por defecto creado (id={template.id})")
+        logger.info("FlowSeeder: FlowTemplate de crisis creado (id=%d)", template.id)
 
     created_count = 0
     for node_data in DEFAULT_NODES:
@@ -248,7 +202,7 @@ def seed_default_flow(db: Session) -> FlowTemplate:
         ).first()
 
         if not existing:
-            node = FlowNode(
+            db.add(FlowNode(
                 flow_template_id=template.id,
                 node_type=node_data["node_type"],
                 node_key=node_data["node_key"],
@@ -256,17 +210,15 @@ def seed_default_flow(db: Session) -> FlowTemplate:
                 message_template=node_data.get("message_template"),
                 expected_responses=node_data.get("expected_responses"),
                 next_node_map=node_data.get("next_node_map"),
-            )
-            db.add(node)
+            ))
             created_count += 1
         else:
-            # Sincronizar todos los campos configurables del nodo
             existing.message_template = node_data.get("message_template")
             existing.expected_responses = node_data.get("expected_responses")
             existing.next_node_map = node_data.get("next_node_map")
 
     if created_count > 0:
-        logger.info(f"FlowSeeder: {created_count} nodo(s) creado(s) en template id={template.id}")
+        logger.info("FlowSeeder: %d nodo(s) creado(s) en template id=%d", created_count, template.id)
 
     db.commit()
     return template

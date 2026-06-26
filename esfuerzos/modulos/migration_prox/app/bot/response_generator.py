@@ -21,11 +21,14 @@ from app.models.negocio import Negocio
 logger = logging.getLogger(__name__)
 
 TEMPLATE_NODES = {
-    "greeting", "farewell", "location", "contact_info",
-    "confirmation", "closure",
+    # nodos genéricos
+    "greeting", "farewell", "location", "contact_info", "confirmation", "closure",
+    # nodos de intake de crisis — nunca LLM
+    "bienvenida", "guia_familiar", "guia_rescatista", "guia_hospital",
+    "pedir_foto", "notas_adicionales", "reporte_guardado", "fallback",
 }
 
-LLM_NODES = {"fallback"}
+LLM_NODES: set = set()  # DeepSeek deshabilitado hasta nueva instrucción
 
 
 class ResponseGenerator:

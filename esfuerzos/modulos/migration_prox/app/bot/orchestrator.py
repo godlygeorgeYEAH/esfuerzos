@@ -34,7 +34,6 @@ from app.bot.decision_engine import DecisionEngine, SimilarityResult
 from app.bot.context_manager import ContextManager
 from app.bot.response_generator import ResponseGenerator
 from app.bot.analytics_logger import AnalyticsLogger
-from app.bot.message_parser import match_expected_response
 from app.bot.dev_logger import dlog
 from app.bot.faq_matcher import match_faq
 from app.models.bot import Conversacion, MensajeConversacion
@@ -143,7 +142,12 @@ class Orchestrator:
              expected_responses=current_node.expected_responses or "ninguna")
 
         if not message_text:
-            dlog("ORCHESTRATOR", "Sin texto — ignorado")
+            # Foto recibida mientras se espera en nodo pedir_foto
+            if media_url and current_node and current_node.node_key == "pedir_foto":
+                response = "Estamos procesando tus imágenes 📸\nEnvía más o escribe *listo* cuando termines."
+                self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+                return response, True
+            dlog("ORCHESTRATOR", "Sin texto ni foto esperada — ignorado")
             return "", False
 
         # --- Paso 6b: FAQ Match — cortocircuito sin LLM ---
@@ -317,21 +321,11 @@ class Orchestrator:
         message_text: str,
         conversation: Conversacion,
     ) -> SimilarityResult:
-        if not current_node.expected_responses:
-            return SimilarityResult()
-
-        try:
-            expected = (
-                json.loads(current_node.expected_responses)
-                if isinstance(current_node.expected_responses, str)
-                else current_node.expected_responses
-            )
-        except Exception:
-            return SimilarityResult()
-
-        matched_response = match_expected_response(message_text, expected, threshold=0.6)
-
-        if not matched_response or not current_node.next_node_map:
+        """
+        Navega exclusivamente por next_node_map, sin expected_responses.
+        Prioridad: clave exacta (case-insensitive) → "default" → sin match.
+        """
+        if not current_node.next_node_map or not message_text.strip():
             return SimilarityResult()
 
         try:
@@ -340,20 +334,21 @@ class Orchestrator:
                 if isinstance(current_node.next_node_map, str)
                 else current_node.next_node_map
             )
-            for key, next_node_key in next_map.items():
-                if key == "default":
-                    continue
-                options = [opt.strip() for opt in key.split("|")]
-                if matched_response in options:
-                    result = self.decision_engine.build_similarity_result(matched_response, next_node_key)
-                    dlog("SIMILARITY", "Match encontrado",
-                         matched=matched_response, next=next_node_key)
-                    return result
-
-            default_key = next_map.get("default")
-            if default_key and matched_response:
-                return self.decision_engine.build_similarity_result(matched_response, default_key)
         except Exception:
-            pass
+            return SimilarityResult()
+
+        text = message_text.strip().lower()
+
+        for key, next_node_key in next_map.items():
+            if key == "default":
+                continue
+            if text in [opt.strip() for opt in key.split("|")]:
+                dlog("SIMILARITY", "Match exacto", matched=text, next=next_node_key)
+                return self.decision_engine.build_similarity_result(text, next_node_key)
+
+        default_key = next_map.get("default")
+        if default_key:
+            dlog("SIMILARITY", "Default advance", next=default_key)
+            return self.decision_engine.build_similarity_result(text, default_key)
 
         return SimilarityResult()
