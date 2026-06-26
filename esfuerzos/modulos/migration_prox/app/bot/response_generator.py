@@ -43,7 +43,7 @@ class ResponseGenerator:
     async def generate(
         self,
         node,
-        negocio_id: int,
+        operacion_id: int,
         conversation,
         intent_result,
         flow_engine,
@@ -59,11 +59,11 @@ class ResponseGenerator:
 
         if strategy == "llm":
             response = await self._llm_response(
-                node, negocio_id, conversation, intent_result, flow_engine, settings
+                node, operacion_id, conversation, intent_result, flow_engine, settings
             )
             return response, "llm"
 
-        response = flow_engine._generate_response(node, negocio_id, conversation)
+        response = flow_engine._generate_response(node, operacion_id, conversation)
         return response, "template"
 
     def _select_strategy(self, node_key: str, intent_result, settings) -> str:
@@ -79,13 +79,13 @@ class ResponseGenerator:
         return "template"
 
     async def _llm_response(
-        self, node, negocio_id, conversation, intent_result, flow_engine, settings
+        self, node, operacion_id, conversation, intent_result, flow_engine, settings
     ) -> str:
         if not settings.deepseek_api_key:
-            return flow_engine._generate_response(node, negocio_id, conversation)
+            return flow_engine._generate_response(node, operacion_id, conversation)
 
         try:
-            ctx = self._load_context(node, negocio_id, conversation, intent_result)
+            ctx = self._load_context(node, operacion_id, conversation, intent_result)
             system_prompt = self._build_system_prompt(ctx["business_name"], node.node_key)
             user_prompt = self._build_node_prompt(node.node_key, ctx)
 
@@ -111,9 +111,9 @@ class ResponseGenerator:
 
         except Exception as e:
             logger.warning("ResponseGenerator: LLM falló, usando template. Error: %s", e)
-            return flow_engine._generate_response(node, negocio_id, conversation)
+            return flow_engine._generate_response(node, operacion_id, conversation)
 
-    def _load_context(self, node, negocio_id: int, conversation, intent_result) -> dict:
+    def _load_context(self, node, operacion_id: int, conversation, intent_result) -> dict:
         db = None
         try:
             from sqlalchemy.orm import object_session
@@ -125,9 +125,9 @@ class ResponseGenerator:
         context = {}
 
         if db:
-            negocio = db.query(Operacion).filter(Operacion.id == negocio_id).first()
-            if negocio and negocio.nombre:
-                business_name = negocio.nombre
+            operacion = db.query(Operacion).filter(Operacion.id == operacion_id).first()
+            if operacion and operacion.nombre:
+                business_name = operacion.nombre
             try:
                 context = json.loads(conversation.context) if conversation.context else {}
             except Exception:

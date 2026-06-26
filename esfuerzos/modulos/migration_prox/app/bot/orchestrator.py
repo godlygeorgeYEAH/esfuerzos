@@ -56,21 +56,21 @@ class Orchestrator:
 
     async def process_message(
         self,
-        negocio_id: int,
+        operacion_id: int,
         client_phone: str,
         message_text: str,
         media_url: Optional[str] = None,
         waha_chat_id: Optional[str] = None,
     ) -> Tuple[str, bool]:
         dlog("ORCHESTRATOR", "INICIO",
-             negocio_id=negocio_id,
+             operacion_id=operacion_id,
              phone=client_phone,
              waha_chat_id=waha_chat_id,
              mensaje=message_text,
              media=bool(media_url))
 
         # --- Paso 1: Cliente bloqueado ---
-        is_blocked = self.engine._is_client_blocked(negocio_id, client_phone)
+        is_blocked = self.engine._is_client_blocked(operacion_id, client_phone)
         dlog("ORCHESTRATOR", "Paso 1: Cliente bloqueado",
              bloqueado=is_blocked,
              resultado="IGNORADO" if is_blocked else "OK -> continuar")
@@ -78,7 +78,7 @@ class Orchestrator:
             return "", False
 
         # --- Paso 2: Bot activo ---
-        bot_config = self.engine._get_bot_config(negocio_id)
+        bot_config = self.engine._get_bot_config(operacion_id)
         bot_activo = bool(bot_config and bot_config.is_bot_active)
         dlog("ORCHESTRATOR", "Paso 2: Bot activo",
              is_bot_active=bot_activo,
@@ -97,13 +97,13 @@ class Orchestrator:
                 or "Gracias por tu mensaje. En este momento no estamos disponibles. Te respondemos pronto."
             )
             self.engine._save_message(
-                negocio_id, client_phone, "client", message_text, save_conversation=False
+                operacion_id, client_phone, "client", message_text, save_conversation=False
             )
             return away_message, True
 
         # --- Paso 4: Obtener o crear conversación ---
         conversation = self.engine._get_or_create_conversation(
-            negocio_id, client_phone, waha_chat_id=waha_chat_id
+            operacion_id, client_phone, waha_chat_id=waha_chat_id
         )
         dlog("ORCHESTRATOR", "Paso 4: Conversación",
              conversation_id=conversation.id,
@@ -111,7 +111,7 @@ class Orchestrator:
 
         # --- Paso 5: Guardar mensaje del cliente ---
         self.engine._save_message(
-            negocio_id, client_phone, "client", message_text,
+            operacion_id, client_phone, "client", message_text,
             conversacion_id=conversation.id,
         )
         dlog("ORCHESTRATOR", "Paso 5: Mensaje cliente guardado",
@@ -127,7 +127,7 @@ class Orchestrator:
         current_node = self.engine._get_current_node(conversation)
 
         if not current_node:
-            current_node = self.engine._get_node_by_key(negocio_id, ENTRY_NODE)
+            current_node = self.engine._get_node_by_key(operacion_id, ENTRY_NODE)
             if current_node:
                 conversation.current_node_key = ENTRY_NODE
                 dlog("ORCHESTRATOR", "Paso 6: Primera interacción", nodo_inicial=ENTRY_NODE)
@@ -145,7 +145,7 @@ class Orchestrator:
         # --- Paso 6c: Nodo pedir_foto — TTL + descarga de fotos ---
         if current_node and current_node.node_key == "pedir_foto":
             return await self._handle_pedir_foto(
-                conversation, negocio_id, message_text, media_url
+                conversation, operacion_id, message_text, media_url
             )
 
         if not message_text:
@@ -153,7 +153,7 @@ class Orchestrator:
             return "", False
 
         # --- Paso 6b: FAQ Match — cortocircuito sin LLM ---
-        faq_respuesta = match_faq(self.db, negocio_id, message_text)
+        faq_respuesta = match_faq(self.db, operacion_id, message_text)
         if faq_respuesta:
             dlog("ORCHESTRATOR", "Paso 6b: FAQ match — cortocircuito",
                  respuesta=faq_respuesta[:60])
@@ -222,9 +222,9 @@ class Orchestrator:
             dlog("ORCHESTRATOR", "Fallback activado", razon=razon)
             response = self.engine._handle_fallback(conversation, message_text)
             self.context_manager.update(conversation, intent_result, message_text)
-            self.analytics_logger.log_intent(conversation.id, negocio_id, intent_result, intent_latency_ms)
+            self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
             self.analytics_logger.log_decision(
-                conversation.id, negocio_id,
+                conversation.id, operacion_id,
                 current_node.node_key, "fallback",
                 razon, metodo,
                 intent_result.confidence, similarity_result.confidence,
@@ -233,7 +233,7 @@ class Orchestrator:
             return response, True
 
         # --- Paso 9: Obtener nodo destino ---
-        next_node = self.engine._get_node_by_key(negocio_id, target_node_key)
+        next_node = self.engine._get_node_by_key(operacion_id, target_node_key)
         if not next_node:
             logger.warning("Orchestrator: nodo '%s' no encontrado, usando fallback", target_node_key)
             response = self.engine._handle_fallback(conversation, message_text)
@@ -266,7 +266,7 @@ class Orchestrator:
         # --- Paso 11: Response Generator ---
         response, response_metodo = await self.response_generator.generate(
             node=next_node,
-            negocio_id=negocio_id,
+            operacion_id=operacion_id,
             conversation=conversation,
             intent_result=intent_result,
             flow_engine=self.engine,
@@ -276,15 +276,15 @@ class Orchestrator:
              respuesta_preview=response[:120])
 
         # --- Paso 12: Analytics Logger ---
-        self.analytics_logger.log_intent(conversation.id, negocio_id, intent_result, intent_latency_ms)
+        self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
         self.analytics_logger.log_decision(
-            conversation.id, negocio_id,
+            conversation.id, operacion_id,
             current_node.node_key, next_node.node_key,
             razon, metodo,
             intent_result.confidence, similarity_result.confidence,
         )
         self.analytics_logger.log_response(
-            conversation.id, negocio_id,
+            conversation.id, operacion_id,
             next_node.node_key, response_metodo,
             len(response),
         )
@@ -310,7 +310,7 @@ class Orchestrator:
     async def _handle_pedir_foto(
         self,
         conversation: Conversacion,
-        negocio_id: int,
+        operacion_id: int,
         message_text: str,
         media_url: Optional[str],
     ) -> Tuple[str, bool]:
@@ -337,7 +337,7 @@ class Orchestrator:
                  count=count, max=settings.photo_max_count, local=local_path or "sin descarga")
 
             if count >= settings.photo_max_count:
-                return self._advance_from_foto(conversation, negocio_id, context, count, "max_alcanzado")
+                return self._advance_from_foto(conversation, operacion_id, context, count, "max_alcanzado")
 
             response = (
                 f"📸 Imagen recibida ({count}/{settings.photo_max_count}).\n"
@@ -367,19 +367,19 @@ class Orchestrator:
             except Exception:
                 pass
 
-        return self._advance_from_foto(conversation, negocio_id, context, count, "ttl_expirado")
+        return self._advance_from_foto(conversation, operacion_id, context, count, "ttl_expirado")
 
     def _advance_from_foto(
         self,
         conversation: Conversacion,
-        negocio_id: int,
+        operacion_id: int,
         context: dict,
         photo_count: int,
         motivo: str,
     ) -> Tuple[str, bool]:
-        notas_node = self.engine._get_node_by_key(negocio_id, "notas_adicionales")
+        notas_node = self.engine._get_node_by_key(operacion_id, "notas_adicionales")
         if notas_node:
-            response = self.engine._generate_response(notas_node, negocio_id, conversation)
+            response = self.engine._generate_response(notas_node, operacion_id, conversation)
         else:
             response = (
                 "📸 Imágenes recibidas.\n\n"

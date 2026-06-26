@@ -22,7 +22,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Recibe todos los eventos entrantes desde WAHA.
 
-    Resuelve el negocio destinatario a partir del campo "session" del payload,
+    Resuelve la operación destinataria a partir del campo "session" del payload,
     respetando el modo WAHA_FREE_TIER para desarrollo con una sola sesión.
     Solo procesa eventos de tipo "message" con texto.
     """
@@ -104,7 +104,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     orchestrator = Orchestrator(db)
     response, should_send = await orchestrator.process_message(
-        negocio_id=operacion.id,
+        operacion_id=operacion.id,
         client_phone=client_phone,
         message_text=message_text,
         media_url=media_url,

@@ -38,15 +38,15 @@ class FlowEngine:
     # Verificaciones
     # ------------------------------------------------------------------
 
-    def _is_client_blocked(self, negocio_id: int, client_phone: str) -> bool:
+    def _is_client_blocked(self, operacion_id: int, client_phone: str) -> bool:
         blocked = self.db.query(BlockedClient).filter(
-            BlockedClient.negocio_id == negocio_id,
+            BlockedClient.operacion_id == operacion_id,
             BlockedClient.client_phone == client_phone,
         ).first()
         return blocked is not None
 
-    def _get_bot_config(self, negocio_id: int) -> Optional[BotConfig]:
-        return self.db.query(BotConfig).filter(BotConfig.negocio_id == negocio_id).first()
+    def _get_bot_config(self, operacion_id: int) -> Optional[BotConfig]:
+        return self.db.query(BotConfig).filter(BotConfig.operacion_id == operacion_id).first()
 
     def _is_within_working_hours(self, bot_config: BotConfig) -> bool:
         now = datetime.now()
@@ -93,10 +93,10 @@ class FlowEngine:
     # ------------------------------------------------------------------
 
     def _get_or_create_conversation(
-        self, negocio_id: int, client_phone: str, waha_chat_id: Optional[str] = None
+        self, operacion_id: int, client_phone: str, waha_chat_id: Optional[str] = None
     ) -> Conversacion:
         conversation = self.db.query(Conversacion).filter(
-            Conversacion.negocio_id == negocio_id,
+            Conversacion.operacion_id == operacion_id,
             Conversacion.client_phone == client_phone,
             Conversacion.status == "active",
         ).order_by(Conversacion.last_message_at.desc()).first()
@@ -108,7 +108,7 @@ class FlowEngine:
             return conversation
 
         conversation = Conversacion(
-            negocio_id=negocio_id,
+            operacion_id=operacion_id,
             client_phone=client_phone,
             waha_chat_id=waha_chat_id,
             status="active",
@@ -130,7 +130,7 @@ class FlowEngine:
             return None
 
         negocio_flow = self.db.query(OperacionFlow).filter(
-            OperacionFlow.negocio_id == conversation.negocio_id,
+            OperacionFlow.operacion_id == conversation.operacion_id,
             OperacionFlow.is_active == True,
         ).first()
 
@@ -142,9 +142,9 @@ class FlowEngine:
             FlowNode.node_key == conversation.current_node_key,
         ).first()
 
-    def _get_node_by_key(self, negocio_id: int, node_key: str) -> Optional[FlowNode]:
+    def _get_node_by_key(self, operacion_id: int, node_key: str) -> Optional[FlowNode]:
         negocio_flow = self.db.query(OperacionFlow).filter(
-            OperacionFlow.negocio_id == negocio_id,
+            OperacionFlow.operacion_id == operacion_id,
             OperacionFlow.is_active == True,
         ).first()
 
@@ -152,7 +152,7 @@ class FlowEngine:
             from app.bot.flow_seeder import seed_default_flow
             template = seed_default_flow(self.db)
             negocio_flow = OperacionFlow(
-                negocio_id=negocio_id,
+                operacion_id=operacion_id,
                 flow_template_id=template.id,
                 is_active=True,
             )
@@ -169,17 +169,17 @@ class FlowEngine:
     # Respuestas por template
     # ------------------------------------------------------------------
 
-    def _generate_response(self, node: FlowNode, negocio_id: int, conversation: Conversacion) -> str:
+    def _generate_response(self, node: FlowNode, operacion_id: int, conversation: Conversacion) -> str:
         if not node.message_template:
             return "..."
 
-        negocio = self.db.query(Operacion).filter(Operacion.id == negocio_id).first()
-        bot_config = self._get_bot_config(negocio_id)
+        operacion = self.db.query(Operacion).filter(Operacion.id == operacion_id).first()
+        bot_config = self._get_bot_config(operacion_id)
         context = self._get_context(conversation)
 
         variables = {
-            'bot_name': negocio.nombre if negocio else "Asistente",
-            'business_name': negocio.nombre if negocio else "Nuestro servicio",
+            'bot_name': operacion.nombre if operacion else "Asistente",
+            'business_name': operacion.nombre if operacion else "Nuestro servicio",
             'welcome_message': bot_config.welcome_message if bot_config and bot_config.welcome_message else "",
         }
 
@@ -187,9 +187,9 @@ class FlowEngine:
         return render_template(node.message_template, variables)
 
     def _handle_fallback(self, conversation: Conversacion, message_text: str) -> str:
-        fallback_node = self._get_node_by_key(conversation.negocio_id, "fallback")
+        fallback_node = self._get_node_by_key(conversation.operacion_id, "fallback")
         if fallback_node and fallback_node.message_template:
-            return self._generate_response(fallback_node, conversation.negocio_id, conversation)
+            return self._generate_response(fallback_node, conversation.operacion_id, conversation)
         return "Disculpa, no entendí tu mensaje. ¿Podrías reformularlo?"
 
     # ------------------------------------------------------------------
@@ -198,7 +198,7 @@ class FlowEngine:
 
     def _save_message(
         self,
-        negocio_id: int,
+        operacion_id: int,
         client_phone: str,
         sender_type: str,
         content: str,
@@ -209,7 +209,7 @@ class FlowEngine:
             return
 
         if not conversacion_id and save_conversation:
-            conversation = self._get_or_create_conversation(negocio_id, client_phone)
+            conversation = self._get_or_create_conversation(operacion_id, client_phone)
             conversacion_id = conversation.id
 
         message = MensajeConversacion(

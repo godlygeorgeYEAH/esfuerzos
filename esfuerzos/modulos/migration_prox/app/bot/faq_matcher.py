@@ -7,14 +7,14 @@ from app.models.bot import PreguntaFrecuente
 _THRESHOLD = 0.65
 
 
-def match_faq(db: Session, negocio_id: int, mensaje: str) -> str | None:
+def match_faq(db: Session, operacion_id: int, mensaje: str) -> str | None:
     """
     Busca si el mensaje del cliente hace match con alguna pregunta frecuente
     activa del negocio. Retorna la respuesta del operador o None si no hay match.
     """
     preguntas = (
         db.query(PreguntaFrecuente)
-        .filter_by(negocio_id=negocio_id, activa=True)
+        .filter_by(operacion_id=operacion_id, activa=True)
         .all()
     )
     if not preguntas:
