@@ -1,7 +1,4 @@
-﻿*.db
-*.db-shm
-*.db-wal
-*.csv
+﻿*.csv
 *.json
 __pycache__/
 *.pyc
