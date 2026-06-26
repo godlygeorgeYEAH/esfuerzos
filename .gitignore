@@ -1,0 +1,12 @@
+﻿*.db
+*.db-shm
+*.db-wal
+*.csv
+*.json
+__pycache__/
+*.pyc
+.env
+*_images/
+proxy_stats.json
+cookies_*.json
+proxies.txt
