@@ -242,6 +242,19 @@ class Orchestrator:
 
         dlog("ORCHESTRATOR", "Paso 9: Nodo destino encontrado", node_key=next_node.node_key)
 
+        # --- Intake hooks ---
+        if current_node.node_key == "guia_familiar" and next_node.node_key == "pedir_foto":
+            _ctx = self.context_manager.get(conversation)
+            _ctx["intake_person_raw"] = message_text
+            conversation.context = json.dumps(_ctx)
+            dlog("ORCHESTRATOR", "Intake: datos crudos capturados", raw=message_text[:80])
+
+        if next_node.node_key == "reporte_guardado":
+            from app.core.intake import commit_report
+            _report = commit_report(self.db, conversation, client_phone, notes=message_text)
+            if _report:
+                dlog("ORCHESTRATOR", "Intake: report creado", report_id=_report.id)
+
         # --- Paso 10: Context Manager ---
         conversation.current_node_key = next_node.node_key
         conversation.last_message_at = datetime.utcnow()
