@@ -12,6 +12,7 @@ class Report(Base):
     kind: Mapped[str] = mapped_column(String(10), index=True)          # 'missing' | 'found'
 
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(20), nullable=True)   # masculino|femenino|otro
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_seen_location: Mapped[str | None] = mapped_column(Text, nullable=True)
     distinguishing_marks: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -38,6 +39,7 @@ class Photo(Base):
         ForeignKey("reports.id", ondelete="CASCADE"), nullable=False, index=True
     )
     media_url: Mapped[str] = mapped_column(Text, nullable=False)
+    local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
