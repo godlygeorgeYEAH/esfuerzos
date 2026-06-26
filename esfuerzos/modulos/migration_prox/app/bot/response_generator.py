@@ -35,9 +35,10 @@ class ResponseGenerator:
     def __init__(self):
         from app.config import get_settings
         settings = get_settings()
-        self.client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
+        api_key = settings.deepseek_api_key or None
+        self.client = (
+            AsyncOpenAI(api_key=api_key, base_url=settings.deepseek_base_url)
+            if api_key else None
         )
 
     async def generate(
