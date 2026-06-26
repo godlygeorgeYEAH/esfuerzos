@@ -341,7 +341,7 @@ class Orchestrator:
 
             response = (
                 f"📸 Imagen recibida ({count}/{settings.photo_max_count}).\n"
-                "Puedes enviar más fotos. Cuando termines, espera un momento."
+                'Puedes enviar más fotos. Escribe *listo* cuando termines.'
             )
             self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
             return response, True
@@ -349,25 +349,19 @@ class Orchestrator:
         # Mensaje de texto en pedir_foto
         count = len(pending_photos)
         if count == 0:
-            response = "Aún no has enviado ninguna foto.\nEnvía una o varias fotos de la persona para continuar."
+            response = "Aún no has enviado ninguna foto.\nEnvía una o varias fotos de la persona y escribe *listo* cuando termines."
             self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
             return response, True
 
-        if last_photo_at_str:
-            try:
-                last_photo_at = datetime.fromisoformat(last_photo_at_str)
-                elapsed = (datetime.utcnow() - last_photo_at).total_seconds()
-                if elapsed < settings.photo_ttl_seconds:
-                    response = (
-                        f"⏳ Aún puedes enviar más fotos ({count}/{settings.photo_max_count} recibidas).\n"
-                        "Cuando termines de enviar, espera un momento y continúa."
-                    )
-                    self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
-                    return response, True
-            except Exception:
-                pass
+        if message_text.strip().lower() == "listo":
+            return self._advance_from_foto(conversation, operacion_id, context, count, "listo")
 
-        return self._advance_from_foto(conversation, operacion_id, context, count, "ttl_expirado")
+        response = (
+            f"⏳ Tienes {count}/{settings.photo_max_count} foto(s) recibida(s).\n"
+            'Puedes enviar más o escribe *listo* para continuar.'
+        )
+        self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+        return response, True
 
     def _advance_from_foto(
         self,
