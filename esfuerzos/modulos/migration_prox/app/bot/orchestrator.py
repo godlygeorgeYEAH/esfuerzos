@@ -22,6 +22,7 @@ Dev mode: DEV_FLOW_LOG=True en .env para logs verbose.
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Optional, Tuple
@@ -141,13 +142,14 @@ class Orchestrator:
              node_key=current_node.node_key,
              expected_responses=current_node.expected_responses or "ninguna")
 
+        # --- Paso 6c: Nodo pedir_foto — TTL + descarga de fotos ---
+        if current_node and current_node.node_key == "pedir_foto":
+            return await self._handle_pedir_foto(
+                conversation, negocio_id, message_text, media_url
+            )
+
         if not message_text:
-            # Foto recibida mientras se espera en nodo pedir_foto
-            if media_url and current_node and current_node.node_key == "pedir_foto":
-                response = "Estamos procesando tus imágenes 📸\nEnvía más o escribe *listo* cuando termines."
-                self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
-                return response, True
-            dlog("ORCHESTRATOR", "Sin texto ni foto esperada — ignorado")
+            dlog("ORCHESTRATOR", "Sin texto — ignorado")
             return "", False
 
         # --- Paso 6b: FAQ Match — cortocircuito sin LLM ---
@@ -287,6 +289,134 @@ class Orchestrator:
 
         dlog("ORCHESTRATOR", "FIN", nodo=next_node.node_key, respuesta=response)
         return response, True
+
+    # ------------------------------------------------------------------
+    # Pedir foto — TTL + descarga + avance automático
+    # ------------------------------------------------------------------
+
+    async def _handle_pedir_foto(
+        self,
+        conversation: Conversacion,
+        negocio_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        from app.config import get_settings
+        settings = get_settings()
+
+        context = self.context_manager.get(conversation)
+        pending_photos: list = context.get("pending_photos", [])
+        last_photo_at_str: Optional[str] = context.get("last_photo_at")
+
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, len(pending_photos))
+            pending_photos.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["pending_photos"] = pending_photos
+            context["last_photo_at"] = datetime.utcnow().isoformat()
+            conversation.context = json.dumps(context)
+
+            count = len(pending_photos)
+            dlog("ORCHESTRATOR", "Foto recibida en pedir_foto",
+                 count=count, max=settings.photo_max_count, local=local_path or "sin descarga")
+
+            if count >= settings.photo_max_count:
+                return self._advance_from_foto(conversation, negocio_id, context, count, "max_alcanzado")
+
+            response = (
+                f"📸 Imagen recibida ({count}/{settings.photo_max_count}).\n"
+                "Puedes enviar más fotos. Cuando termines, espera un momento."
+            )
+            self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Mensaje de texto en pedir_foto
+        count = len(pending_photos)
+        if count == 0:
+            response = "Aún no has enviado ninguna foto.\nEnvía una o varias fotos de la persona para continuar."
+            self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        if last_photo_at_str:
+            try:
+                last_photo_at = datetime.fromisoformat(last_photo_at_str)
+                elapsed = (datetime.utcnow() - last_photo_at).total_seconds()
+                if elapsed < settings.photo_ttl_seconds:
+                    response = (
+                        f"⏳ Aún puedes enviar más fotos ({count}/{settings.photo_max_count} recibidas).\n"
+                        "Cuando termines de enviar, espera un momento y continúa."
+                    )
+                    self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+                    return response, True
+            except Exception:
+                pass
+
+        return self._advance_from_foto(conversation, negocio_id, context, count, "ttl_expirado")
+
+    def _advance_from_foto(
+        self,
+        conversation: Conversacion,
+        negocio_id: int,
+        context: dict,
+        photo_count: int,
+        motivo: str,
+    ) -> Tuple[str, bool]:
+        notas_node = self.engine._get_node_by_key(negocio_id, "notas_adicionales")
+        if notas_node:
+            response = self.engine._generate_response(notas_node, negocio_id, conversation)
+        else:
+            response = (
+                "📸 Imágenes recibidas.\n\n"
+                "¿Tienes señas, ropa u otros detalles? Escríbelos ahora.\n\n"
+                "O escribe *reporte* para registrar un nuevo caso."
+            )
+        conversation.current_node_key = "notas_adicionales"
+        dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
+             fotos=photo_count, motivo=motivo)
+        self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    async def _download_photo(
+        self,
+        media_url: str,
+        conversation_id: int,
+        index: int,
+    ) -> Optional[str]:
+        import httpx
+        from app.config import get_settings
+        settings = get_settings()
+
+        storage_dir = settings.photo_storage_path
+        os.makedirs(storage_dir, exist_ok=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(media_url)
+                resp.raise_for_status()
+
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                ext = "jpg"
+                if "png" in content_type:
+                    ext = "png"
+                elif "webp" in content_type:
+                    ext = "webp"
+                elif "gif" in content_type:
+                    ext = "gif"
+
+                filename = f"{conversation_id}_{index}.{ext}"
+                local_path = os.path.join(storage_dir, filename)
+
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+
+                logger.info("Foto descargada: %s → %s", media_url, local_path)
+                return local_path
+        except Exception as e:
+            logger.warning("No se pudo descargar foto %s: %s", media_url, e)
+            return None
 
     # ------------------------------------------------------------------
     # Guardar mensaje del bot

@@ -79,10 +79,7 @@ DEFAULT_NODES = [
             "Cuando termines, escribe *listo*."
         ),
         "expected_responses": None,
-        "next_node_map": json.dumps({
-            "listo": "notas_adicionales",
-            "default": "pedir_foto",
-        }),
+        "next_node_map": json.dumps({"default": "pedir_foto"}),
     },
 
     # ------------------------------------------------------------------

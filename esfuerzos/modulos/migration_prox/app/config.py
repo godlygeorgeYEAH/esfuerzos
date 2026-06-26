@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     intent_low_confidence: float = 0.65
 
     # ----------------------------------------------------------------
+    # Fotos de intake
+    # ----------------------------------------------------------------
+    photo_max_count: int = 5          # máximo de fotos por reporte
+    photo_ttl_seconds: int = 60       # segundos sin nueva foto para considerar la sesión cerrada
+    photo_storage_path: str = "media/photos"  # directorio local de descarga
+
+    # ----------------------------------------------------------------
     # Entorno
     # ----------------------------------------------------------------
     environment: str = "development"
