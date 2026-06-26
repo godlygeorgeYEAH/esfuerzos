@@ -98,6 +98,42 @@ async def send_location(
             return False
 
 
+async def send_match_notification(
+    phone: str,
+    missing_name: str,
+    found_location: str,
+    found_state: str = "unknown",
+    coordinator_contact: str = "",
+    session: str = "default",
+) -> bool:
+    """Notifica al reportero (familiar) que se encontró una posible coincidencia.
+
+    La confirmación siempre requiere verificación humana — el mensaje lo deja
+    explícito para evitar falsas esperanzas.
+    """
+    state_label = {
+        "alive": "con vida",
+        "injured": "con heridas",
+        "deceased": "fallecida",
+    }.get(found_state, "en estado desconocido")
+
+    contact_line = f"\n📞 Contacto de verificación: {coordinator_contact}" if coordinator_contact else ""
+
+    message = (
+        f"🔔 *Posible coincidencia para {missing_name}*\n\n"
+        f"Encontramos a una persona {state_label} en:\n"
+        f"📍 {found_location}\n"
+        f"{contact_line}\n\n"
+        "⚠️ Esta es una coincidencia *preliminar*. "
+        "Un coordinador deberá verificarla antes de confirmar.\n\n"
+        "Responde *CONFIRMAR* si deseas que un coordinador te contacte."
+    )
+    result = await send_message(phone, message, session=session)
+    if result:
+        logger.info("Match notification sent to %s for '%s'", phone, missing_name)
+    return bool(result)
+
+
 async def send_image(phone: str, image_url: str, caption: str = "", session: str = "default") -> bool:
     """Envía una imagen vía WAHA."""
     url = f"{settings.waha_url}/api/sendImage"
