@@ -12,10 +12,10 @@ from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 
 from app.models.bot import (
-    Conversacion, MensajeConversacion, FlowNode, NegocioFlow,
+    Conversacion, MensajeConversacion, FlowNode, OperacionFlow,
     BotConfig, BlockedClient,
 )
-from app.models.negocio import Negocio
+from app.models.negocio import Operacion
 from app.bot.template_renderer import render_template, add_context_variables
 
 
@@ -129,9 +129,9 @@ class FlowEngine:
         if not conversation.current_node_key:
             return None
 
-        negocio_flow = self.db.query(NegocioFlow).filter(
-            NegocioFlow.negocio_id == conversation.negocio_id,
-            NegocioFlow.is_active == True,
+        negocio_flow = self.db.query(OperacionFlow).filter(
+            OperacionFlow.negocio_id == conversation.negocio_id,
+            OperacionFlow.is_active == True,
         ).first()
 
         if not negocio_flow:
@@ -143,15 +143,15 @@ class FlowEngine:
         ).first()
 
     def _get_node_by_key(self, negocio_id: int, node_key: str) -> Optional[FlowNode]:
-        negocio_flow = self.db.query(NegocioFlow).filter(
-            NegocioFlow.negocio_id == negocio_id,
-            NegocioFlow.is_active == True,
+        negocio_flow = self.db.query(OperacionFlow).filter(
+            OperacionFlow.negocio_id == negocio_id,
+            OperacionFlow.is_active == True,
         ).first()
 
         if not negocio_flow:
             from app.bot.flow_seeder import seed_default_flow
             template = seed_default_flow(self.db)
-            negocio_flow = NegocioFlow(
+            negocio_flow = OperacionFlow(
                 negocio_id=negocio_id,
                 flow_template_id=template.id,
                 is_active=True,
@@ -173,7 +173,7 @@ class FlowEngine:
         if not node.message_template:
             return "..."
 
-        negocio = self.db.query(Negocio).filter(Negocio.id == negocio_id).first()
+        negocio = self.db.query(Operacion).filter(Operacion.id == negocio_id).first()
         bot_config = self._get_bot_config(negocio_id)
         context = self._get_context(conversation)
 

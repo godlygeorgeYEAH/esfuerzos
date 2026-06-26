@@ -1,7 +1,7 @@
 """
-Seed de Reúne v1 — crea Negocio, BotConfig, FlowTemplate y NegocioFlow.
+Seed de Reúne v1 — crea Operacion, BotConfig, FlowTemplate y OperacionFlow.
 
-Idempotente: si el Negocio con slug 'reune' ya existe, solo actualiza
+Idempotente: si el Operacion con slug 'reune' ya existe, solo actualiza
 BotConfig y re-ejecuta el seeder de nodos. Seguro de correr en cada deploy.
 
 Uso:
@@ -36,8 +36,8 @@ def run() -> None:
 
     # Importaciones después de crear el engine para que Base esté lista
     from app.database import Base
-    from app.models.negocio import Negocio
-    from app.models.bot import BotConfig, NegocioFlow
+    from app.models.operacion import Operacion
+    from app.models.bot import BotConfig, OperacionFlow
     from app.models.reporte import Report, Photo  # noqa: F401 — registra en Base
     from app.bot.flow_seeder import seed_default_flow
 
@@ -48,26 +48,26 @@ def run() -> None:
     db = Session()
 
     try:
-        # --- Negocio ---
-        negocio = db.query(Negocio).filter(Negocio.slug == "reune").first()
-        if not negocio:
-            negocio = Negocio(
+        # --- Operacion ---
+        operacion = db.query(Operacion).filter(Operacion.slug == "reune").first()
+        if not operacion:
+            operacion = Operacion(
                 nombre="Reúne",
                 slug="reune",
                 waha_session="default",
                 is_active=True,
             )
-            db.add(negocio)
+            db.add(operacion)
             db.flush()
-            logger.info("Negocio creado: id=%d slug=reune", negocio.id)
+            logger.info("Operacion creado: id=%d slug=reune", operacion.id)
         else:
-            logger.info("Negocio existente: id=%d slug=reune", negocio.id)
+            logger.info("Operacion existente: id=%d slug=reune", operacion.id)
 
         # --- BotConfig ---
-        bot_config = db.query(BotConfig).filter(BotConfig.negocio_id == negocio.id).first()
+        bot_config = db.query(BotConfig).filter(BotConfig.operacion_id == operacion.id).first()
         if not bot_config:
             bot_config = BotConfig(
-                negocio_id=negocio.id,
+                operacion_id=operacion.id,
                 is_bot_active=True,
                 enable_intent_detection=False,   # DeepSeek deshabilitado
                 delivery_enabled=False,
@@ -76,11 +76,11 @@ def run() -> None:
                 working_hours_end=None,
             )
             db.add(bot_config)
-            logger.info("BotConfig creado para negocio_id=%d", negocio.id)
+            logger.info("BotConfig creado para operacion_id=%d", operacion.id)
         else:
             bot_config.is_bot_active = True
             bot_config.enable_intent_detection = False
-            logger.info("BotConfig actualizado para negocio_id=%d", negocio.id)
+            logger.info("BotConfig actualizado para operacion_id=%d", operacion.id)
 
         db.commit()
 
@@ -88,22 +88,22 @@ def run() -> None:
         template = seed_default_flow(db)
         logger.info("FlowTemplate activo: id=%d '%s'", template.id, template.name)
 
-        # --- NegocioFlow ---
-        neg_flow = db.query(NegocioFlow).filter(NegocioFlow.negocio_id == negocio.id).first()
+        # --- OperacionFlow ---
+        neg_flow = db.query(OperacionFlow).filter(OperacionFlow.operacion_id == operacion.id).first()
         if not neg_flow:
-            neg_flow = NegocioFlow(
-                negocio_id=negocio.id,
+            neg_flow = OperacionFlow(
+                operacion_id=operacion.id,
                 flow_template_id=template.id,
                 is_active=True,
             )
             db.add(neg_flow)
             db.commit()
-            logger.info("NegocioFlow creado: negocio_id=%d → flow_id=%d", negocio.id, template.id)
+            logger.info("OperacionFlow creado: operacion_id=%d → flow_id=%d", operacion.id, template.id)
         else:
             neg_flow.flow_template_id = template.id
             neg_flow.is_active = True
             db.commit()
-            logger.info("NegocioFlow actualizado: negocio_id=%d → flow_id=%d", negocio.id, template.id)
+            logger.info("OperacionFlow actualizado: operacion_id=%d → flow_id=%d", operacion.id, template.id)
 
         logger.info("Seed completado. Sistema listo.")
 

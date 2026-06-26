@@ -23,7 +23,7 @@ class BotConfig(Base):
     __tablename__ = "bot_config"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    negocio_id = Column(Integer, ForeignKey("negocios.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    negocio_id = Column(Integer, ForeignKey("operaciones.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
 
     # Mensajes automáticos
     welcome_message = Column(String, nullable=True)
@@ -65,7 +65,7 @@ class BlockedClient(Base):
     __tablename__ = "blocked_clients"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    negocio_id = Column(Integer, ForeignKey("negocios.id", ondelete="CASCADE"), nullable=False, index=True)
+    negocio_id = Column(Integer, ForeignKey("operaciones.id", ondelete="CASCADE"), nullable=False, index=True)
     client_phone = Column(String, nullable=False, index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
@@ -85,7 +85,7 @@ class Conversacion(Base):
     __tablename__ = "conversaciones"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    negocio_id = Column(Integer, ForeignKey("negocios.id", ondelete="CASCADE"), nullable=False, index=True)
+    negocio_id = Column(Integer, ForeignKey("operaciones.id", ondelete="CASCADE"), nullable=False, index=True)
 
     # Datos del cliente
     client_phone = Column(String, nullable=False, index=True)
@@ -200,15 +200,15 @@ class FlowNode(Base):
         return f"<FlowNode(id={self.id}, key={self.node_key}, type={self.node_type})>"
 
 
-class NegocioFlow(Base):
+class OperacionFlow(Base):
     """
-    Asocia un negocio con su FlowTemplate activo.
-    Permite customización futura por negocio.
+    Asocia una Operacion con su FlowTemplate activo.
+    Permite customización futura por operación.
     """
-    __tablename__ = "negocio_flows"
+    __tablename__ = "operacion_flows"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    negocio_id = Column(Integer, ForeignKey("negocios.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    negocio_id = Column(Integer, ForeignKey("operaciones.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     flow_template_id = Column(Integer, ForeignKey("flow_templates.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False)
     custom_parameters = Column(String, nullable=True)   # JSON: overrides por nodo
@@ -216,7 +216,7 @@ class NegocioFlow(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     def __repr__(self):
-        return f"<NegocioFlow(negocio_id={self.negocio_id}, flow_id={self.flow_template_id})>"
+        return f"<OperacionFlow(negocio_id={self.negocio_id}, flow_id={self.flow_template_id})>"
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ class PreguntaFrecuente(Base):
     __tablename__ = "preguntas_frecuentes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    negocio_id = Column(Integer, ForeignKey("negocios.id", ondelete="CASCADE"), nullable=False, index=True)
+    negocio_id = Column(Integer, ForeignKey("operaciones.id", ondelete="CASCADE"), nullable=False, index=True)
     pregunta = Column(Text, nullable=False)
     respuesta = Column(Text, nullable=False)
     activa = Column(Boolean, default=True, nullable=False)

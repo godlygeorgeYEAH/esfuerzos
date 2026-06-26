@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.core.waha_resolver import resolve_negocio
+from app.core.waha_resolver import resolve_operacion
 from app.bot.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -36,19 +36,19 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.json()
 
     session_name = payload.get("session", "default")
-    negocio = resolve_negocio(session_name, db)
+    operacion = resolve_operacion(session_name, db)
 
-    if negocio is None:
+    if operacion is None:
         logger.warning(
-            "Mensaje descartado: no se pudo resolver negocio para session='%s'.", session_name
+            "Mensaje descartado: no se pudo resolver operación para session='%s'.", session_name
         )
         return {"status": "ignored"}
 
     event = payload.get("event", "unknown")
     logger.info(
-        "WAHA webhook recibido | negocio=%s (id=%d) | session=%s | event=%s",
-        negocio.slug,
-        negocio.id,
+        "WAHA webhook recibido | operacion=%s (id=%d) | session=%s | event=%s",
+        operacion.slug,
+        operacion.id,
         session_name,
         event,
     )
@@ -104,7 +104,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     orchestrator = Orchestrator(db)
     response, should_send = await orchestrator.process_message(
-        negocio_id=negocio.id,
+        negocio_id=operacion.id,
         client_phone=client_phone,
         message_text=message_text,
         media_url=media_url,
@@ -114,8 +114,8 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     if should_send and response:
         from app.services.waha import send_message as waha_send
         sent = await waha_send(phone=chat_id, message=response, session=session_name)
-        logger.warning("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        logger.info("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
     else:
-        logger.warning("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
+        logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
 
     return {"status": "processed", "sent": should_send and bool(response)}

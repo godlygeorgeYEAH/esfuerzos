@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 
 from app.bot.dev_logger import dlog
 from app.models.bot import BotConfig
-from app.models.negocio import Negocio
+from app.models.negocio import Operacion
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class ResponseGenerator:
         context = {}
 
         if db:
-            negocio = db.query(Negocio).filter(Negocio.id == negocio_id).first()
+            negocio = db.query(Operacion).filter(Operacion.id == negocio_id).first()
             if negocio and negocio.nombre:
                 business_name = negocio.nombre
             try:
