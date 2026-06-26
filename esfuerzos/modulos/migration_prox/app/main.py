@@ -26,7 +26,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Seed del flujo conversacional al arrancar la aplicación."""
+    """Seed del flujo conversacional y configuración de sesión WAHA al arrancar."""
     try:
         from app.database import SessionLocal, Base, engine
         from app.models import negocio, bot, reporte  # noqa: F401 — registra en Base
@@ -40,6 +40,13 @@ async def lifespan(app: FastAPI):
             db.close()
     except Exception as e:
         logger.warning("FlowSeeder falló al arrancar (no crítico): %s", e)
+
+    try:
+        from app.services.waha import ensure_default_session
+        await ensure_default_session()
+    except Exception as e:
+        logger.warning("WAHA session setup falló al arrancar (no crítico): %s", e)
+
     yield
 
 

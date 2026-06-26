@@ -12,6 +12,7 @@ services:
     environment:
       DATABASE_URL: sqlite:////data/reune.db
       WAHA_URL: http://waha:3000
+      WAHA_SESSION: ${WAHA_SESSION:-default}
       WAHA_WEBHOOK_URL: http://bot:8000/webhook/waha
       WAHA_FREE_TIER: "true"
       WAHA_API_KEY: ${WAHA_API_KEY:-}

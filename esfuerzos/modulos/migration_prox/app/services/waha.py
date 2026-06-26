@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 import httpx
@@ -5,6 +6,75 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+async def ensure_default_session(retries: int = 15, delay: float = 2.0) -> bool:
+    """Crea/verifica la sesión WAHA con el webhook correcto al arrancar.
+
+    Reintenta hasta `retries` veces con `delay` segundos entre intentos —
+    WAHA puede tardar en estar listo tras `docker compose up`.
+    """
+    session_name = settings.waha_session
+    webhook_url = settings.waha_webhook_url
+    sessions_url = f"{settings.waha_url}/api/sessions"
+    session_url = f"{settings.waha_url}/api/sessions/{session_name}"
+
+    webhook_payload = {
+        "url": webhook_url,
+        "events": ["message", "message.any"],
+    }
+
+    for attempt in range(1, retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                # Intentar leer la sesión existente
+                resp = await client.get(session_url, headers=_headers())
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    existing_webhooks = (data.get("config") or {}).get("webhooks") or []
+                    already_correct = any(w.get("url") == webhook_url for w in existing_webhooks)
+                    if already_correct:
+                        logger.info("WAHA session '%s' already configured correctly.", session_name)
+                        return True
+                    # Sesión existe pero webhook incorrecto — actualizar vía PATCH
+                    patch_resp = await client.patch(
+                        session_url,
+                        json={"config": {"webhooks": [webhook_payload]}},
+                        headers=_headers(),
+                    )
+                    if patch_resp.status_code in (200, 201):
+                        logger.info("WAHA session '%s' webhook updated to %s.", session_name, webhook_url)
+                        return True
+                    logger.warning("WAHA PATCH session returned %s.", patch_resp.status_code)
+
+                elif resp.status_code == 404:
+                    # Sesión no existe — crearla
+                    create_resp = await client.post(
+                        sessions_url,
+                        json={
+                            "name": session_name,
+                            "config": {"webhooks": [webhook_payload]},
+                            "start": True,
+                        },
+                        headers=_headers(),
+                    )
+                    if create_resp.status_code in (200, 201):
+                        logger.info("WAHA session '%s' created with webhook %s.", session_name, webhook_url)
+                        return True
+                    logger.warning("WAHA POST session returned %s: %s", create_resp.status_code, create_resp.text)
+
+                else:
+                    logger.warning("WAHA session check returned %s (attempt %d/%d).", resp.status_code, attempt, retries)
+
+        except httpx.HTTPError as e:
+            logger.warning("WAHA not ready yet (attempt %d/%d): %s", attempt, retries, e)
+
+        if attempt < retries:
+            await asyncio.sleep(delay)
+
+    logger.error("Could not configure WAHA session '%s' after %d attempts.", session_name, retries)
+    return False
 
 
 def _headers() -> dict:

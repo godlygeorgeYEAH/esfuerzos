@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # ----------------------------------------------------------------
     waha_url: str = "http://localhost:3000"
     waha_api_key: str = ""
+    waha_session: str = "default"
     waha_webhook_url: str = "http://localhost:8000/webhook/waha"
     waha_free_tier: bool = True          # True = un solo negocio; False = multi-tenant por waha_session
     waha_webhook_secret: str | None = None  # Si se setea, WAHA debe enviar X-WAHA-Token
