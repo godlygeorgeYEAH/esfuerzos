@@ -293,7 +293,73 @@ BOT_SELF_MESSAGE_TESTING=true
 
 ---
 
-## 15. Arranque con Claude Code
+## 15. Arranque rápido con Docker
+
+El módulo de WhatsApp (`modulos/migration_prox`) incluye un `docker-compose.yml` que levanta el sistema completo en dos comandos.
+
+### Requisitos
+
+- Docker Desktop (Windows/Mac) o Docker Engine + Compose plugin (Linux)
+- Puerto 3000 (WAHA) y 8000 (bot) libres
+
+### Levantar
+
+```bash
+cd modulos/migration_prox
+
+# Solo la primera vez:
+cp .env.example .env
+# Editar .env si necesitas cambiar algún valor (en desarrollo no es obligatorio)
+
+docker compose up --build
+```
+
+Al arrancar verás:
+```
+reune_waha  | WhatsApp Web client initialized
+reune_bot   | FlowSeeder: flujo por defecto verificado/creado.
+reune_bot   | Uvicorn running on http://0.0.0.0:8000
+```
+
+### Conectar WhatsApp
+
+1. Abre `http://localhost:3000/dashboard` en el navegador
+2. Selecciona la sesión `default` → **Start session**
+3. Escanea el QR con la app de WhatsApp del número que usarás como bot
+4. Cuando el estado cambie a `WORKING`, el sistema está listo
+
+### Probar
+
+```bash
+# Enviar mensaje de prueba (simula WAHA)
+curl -s -X POST http://localhost:8000/webhook/waha \
+  -H "Content-Type: application/json" \
+  -d '{"session":"default","event":"message","payload":{"from":"584121234567@c.us","fromMe":false,"body":"hola","hasMedia":false}}'
+# Esperado: {"status":"processed","sent":true}
+```
+
+### Variables de entorno
+
+En desarrollo no se necesita nada. Para producción las únicas relevantes son:
+
+| Variable | Para qué |
+|---|---|
+| `DATABASE_URL` | Cambiar a PostgreSQL |
+| `WAHA_API_KEY` | Si activas auth en WAHA |
+| `WAHA_WEBHOOK_SECRET` | Validar origen del webhook |
+| `WAHA_WEBHOOK_URL` | URL pública del bot (ngrok, dominio, IP) |
+| `ENVIRONMENT=production` | Desactiva `/docs` y `/redoc` |
+
+### Detener y limpiar
+
+```bash
+docker compose down          # detiene contenedores
+docker compose down -v       # detiene + borra volúmenes (borra DB y sesión WA)
+```
+
+---
+
+## 16. Arranque con Claude Code
 
 **Primer objetivo (WhatsApp):** levantar WAHA + webhook funcional (sección 7.1) con los flujos de intake de texto (sección 7.1) antes de integrar CompreFace o embeddings.
 
