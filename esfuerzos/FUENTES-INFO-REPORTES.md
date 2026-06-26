@@ -5,5 +5,5 @@
 * VenezReporta — https://venezuelareporta.org/buscar
 * VenezuelaTeBusca - https://venezuela-te-busca-app.hellogafaro.workers.dev/
 * Buscador de Desaparecidos - https://buscador-desaparecidos-vzla.vercel.app/
-* Desaparecidos - https://desaparecidosterremotovenezuela.com/
-* TerremotoVenezuela - https://terremotovenezuela.app/
+* Desaparecidos - https://desaparecidosterremotovenezuela.com/ - FALTA
+* TerremotoVenezuela - https://terremotovenezuela.app/ - FALTA
