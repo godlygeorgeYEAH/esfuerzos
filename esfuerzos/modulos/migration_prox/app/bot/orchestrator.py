@@ -348,10 +348,6 @@ class Orchestrator:
 
         # Mensaje de texto en pedir_foto
         count = len(pending_photos)
-        if count == 0:
-            response = "Aún no has enviado ninguna foto.\nEnvía una o varias fotos de la persona y escribe *listo* cuando termines."
-            self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
-            return response, True
 
         if message_text.strip().lower() == "listo":
             return self._advance_from_foto(conversation, operacion_id, context, count, "listo")
