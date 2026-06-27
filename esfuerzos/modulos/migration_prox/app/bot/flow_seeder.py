@@ -51,14 +51,11 @@ DEFAULT_NODES = [
         "node_type": "intake_guide",
         "order_position": 2,
         "message_template": (
-            "Vamos a registrar el reporte en 3 pasos:\n\n"
-            "*1.* Datos de la persona\n"
-            "*2.* Una o varias fotos\n"
-            "*3.* Notas adicionales (opcional)\n\n"
-            "Envíame en *un solo mensaje*:\n"
-            "› Nombre completo\n"
-            "› Género\n"
-            "› Edad\n"
+            "Vamos a registrar el reporte en 3 pasos.\n\n"
+            "Para el primer paso, envíame *un solo mensaje* con esta información:\n\n"
+            "› El nombre completo de a quien estás reportando\n\n"
+            "› El género de la persona que estás reportando\n\n"
+            "› La edad de la persona que estás reportando\n\n"
             "› Última ubicación conocida\n\n"
             "_Ejemplo: María García, femenino, 34, Cumaná centro_"
         ),
