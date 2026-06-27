@@ -9,11 +9,6 @@ class Settings(BaseSettings):
     waha_api_key: str = ""
     waha_webhook_secret: str = ""
     waha_session: str = "default"
-    # Base44 Superagent
-    base44_webhook_secret: str = ""
-    base44_agent_id: str = ""
-    base44_api_key: str = ""
-    vps_public_url: str = ""
     # Matching thresholds
     face_match_threshold: float = 0.50
     text_match_threshold: float = 0.75

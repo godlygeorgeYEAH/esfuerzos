@@ -140,16 +140,19 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
 async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
+    age_raw = data.get("age")
+    try:
+        age_int = int(str(age_raw).strip()) if age_raw else None
+    except (ValueError, TypeError):
+        age_int = None
     row = {
         "source": "waha_whatsapp",
         "source_url": f"waha:{conv_key}",
         "kind": data.get("kind") or "missing",
-        "name": data.get("name", ""),
-        "age": str(data.get("age", "")) if data.get("age") else None,
-        "location": data.get("location"),
-        "description": data.get("description"),
-        "phone": phone,
-        "raw_data": data,
+        "full_name": (data.get("name") or "").strip(),
+        "age": age_int,
+        "last_seen_location": data.get("location"),
+        "distinguishing_marks": data.get("description"),
     }
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
@@ -267,7 +270,14 @@ async def _handle_message(payload: dict, app: Any) -> None:
         report_id = await _upsert_report(phone, extracted, conv_key)
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
-            asyncio.create_task(embed_and_match_report(report_id, extracted, app))
+            report_for_embed = {
+                "full_name": extracted.get("name", ""),
+                "age": extracted.get("age"),
+                "last_seen_location": extracted.get("location"),
+                "distinguishing_marks": extracted.get("description"),
+                "kind": extracted.get("kind") or "missing",
+            }
+            asyncio.create_task(embed_and_match_report(report_id, report_for_embed, app))
         else:
             logger.error("Failed to upsert report for phone %s", phone)
 

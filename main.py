@@ -1,8 +1,8 @@
 """
 main.py - Reune VE API v2.0
 
-Transport: Base44 WhatsApp (agent with native WhatsApp number).
-Receives webhooks from Base44 at POST /hooks/base44 (message.completed).
+Transport: WAHA WhatsApp (self-hosted, number +5731157915931).
+Receives webhooks from WAHA at POST /webhook/waha (message event).
 
 Services:
   - APScheduler: scraper jobs every 5 min (poll) and 1 hour (full sweep)
@@ -32,8 +32,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
-from base44_poller import run_polling_loop
-from base44_webhook_router import router as base44_router
 from config import get_settings
 from consolidation_pipeline import (
     compute_text_embeddings,
@@ -51,40 +49,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
-BASE44_URL = f"https://app.base44.com/api/agents/{settings.base44_agent_id}"
-_B44_HEADERS = {"api_key": settings.base44_api_key, "Content-Type": "application/json"}
-
-
-async def _register_base44_webhook() -> None:
-    """Register our endpoint as a Base44 webhook (idempotent)."""
-    target = f"{settings.vps_public_url}/hooks/base44"
-    try:
-        async with httpx.AsyncClient(timeout=10) as cl:
-            r = await cl.get(f"{BASE44_URL}/webhooks", headers=_B44_HEADERS)
-            existing = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
-            for wh in existing:
-                if wh.get("target_url") == target:
-                    if not wh.get("enabled", True):
-                        await cl.patch(
-                            f"{BASE44_URL}/webhooks/{wh['id']}",
-                            headers=_B44_HEADERS,
-                            json={"enabled": True},
-                        )
-                        logger.info("Re-enabled Base44 webhook %s", wh["id"])
-                    else:
-                        logger.info("Base44 webhook already active: %s", wh["id"])
-                    return
-            resp = await cl.post(
-                f"{BASE44_URL}/webhooks",
-                headers=_B44_HEADERS,
-                json={"target_url": target, "events": ["message.completed"], "generate_secret": False},
-            )
-            if resp.status_code in (200, 201):
-                logger.info("Base44 webhook registered: %s", resp.json().get("id"))
-            else:
-                logger.warning("Webhook registration failed %d: %s", resp.status_code, resp.text[:150])
-    except Exception as exc:
-        logger.warning("_register_base44_webhook error: %s", exc)
 
 
 @asynccontextmanager
@@ -127,9 +91,7 @@ async def lifespan(app: FastAPI):
     )
 
     asyncio.create_task(_startup_sweep(scrapers))
-    asyncio.create_task(_register_base44_webhook())
-    asyncio.create_task(run_polling_loop(app))
-    logger.info("Startup complete: %d scraper jobs", len(scheduler.get_jobs()))
+    logger.info("Startup complete: %d scraper jobs, WAHA transport active", len(scheduler.get_jobs()))
 
     yield
 
@@ -163,23 +125,23 @@ for _mount_path, _dir in [
     if os.path.isdir(_dir):
         app.mount(_mount_path, StaticFiles(directory=_dir), name=_mount_path.lstrip("/"))
 
-app.include_router(base44_router)
 app.include_router(waha_router)
 
 
 @app.get("/health")
 async def health():
     results = {
-        "base44": False,
+        "waha": False,
         "supabase": False,
         "text_model": hasattr(app.state, "text_model") and app.state.text_model is not None,
         "face_model": hasattr(app.state, "face_model") and app.state.face_model is not None,
         "scrapers": list(getattr(app.state, "scrapers", {}).keys()),
     }
+    waha_url = settings.waha_url.rstrip("/")
     async with httpx.AsyncClient(timeout=5) as cl:
         try:
-            r = await cl.get(f"{BASE44_URL}/webhooks", headers={"api_key": settings.base44_api_key})
-            results["base44"] = r.status_code < 500
+            r = await cl.get(f"{waha_url}/api/sessions")
+            results["waha"] = r.status_code < 500
         except Exception:
             pass
         try:

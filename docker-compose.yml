@@ -22,10 +22,22 @@ services:
       - default
       - reune_waha
 
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: waha
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - waha_data:/app/.sessions
+    networks:
+      - reune_waha
+
 volumes:
   insightface_cache:
   huggingface_cache:
   app_data:
+  waha_data:
 
 networks:
   reune_waha:
