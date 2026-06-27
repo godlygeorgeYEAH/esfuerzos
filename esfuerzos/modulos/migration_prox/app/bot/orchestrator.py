@@ -449,7 +449,8 @@ class Orchestrator:
             if caption:
                 logger.info("[BOT] phone=%s guia_rescatista → imagen+caption recibida (%d)", conversation.client_phone, count)
                 response = (
-                    f"📸 Tomé el caption de tu imagen ({count} foto(s)).\n\n"
+                    f"📸 Imagen recibida. Leí tu mensaje:\n"
+                    f"_{caption}_\n\n"
                     "Puedes agregar más texto o enviar más fotos.\n"
                     "Escribe *listo* para terminar este reporte."
                 )
