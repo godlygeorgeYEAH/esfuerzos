@@ -115,16 +115,35 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     message_text = (payload_data.get("body") or "").strip()
 
-    # DEBUG TEMPORAL — loguear payload completo para identificar estructura de list response
-    import json as _json
-    logger.info("DEBUG payload_data keys: %s", list(payload_data.keys()))
-    logger.info("DEBUG payload_data: %s", _json.dumps(payload_data, default=str)[:1000])
+    # Respuesta de lista interactiva — WAHA NOWEB no expone rowId en el top-level del payload.
+    # El body contiene el título de la fila ("Hospital o refugio") en lugar del rowId ("3").
+    # Extraemos el rowId con tres estrategias en orden de prioridad:
+    #   1. _data.listResponseMessage.singleSelectReply.selectedRowId  (Baileys directo)
+    #   2. _data.message.listResponseMessage.singleSelectReply.selectedRowId  (envuelto)
+    #   3. Matching del título en replyTo._data.listMessage.sections  (fallback robusto)
+    _row_id: str | None = None
+    _raw_data = payload_data.get("_data") or {}
 
-    # Respuesta de lista interactiva — WAHA envía el título de la fila en body
-    # pero el rowId (que el FSM necesita) viene en listResponse.
-    # Reemplazamos message_text con el rowId para que la navegación funcione.
-    _list_resp = payload_data.get("listResponse") or {}
-    _row_id = (_list_resp.get("singleSelectReply") or {}).get("selectedRowId") or _list_resp.get("selectedRowId")
+    # Estrategia 1 y 2 — listResponseMessage en _data
+    _list_resp_msg = _raw_data.get("listResponseMessage") or (
+        (_raw_data.get("message") or {}).get("listResponseMessage")
+    )
+    if _list_resp_msg:
+        _row_id = ((_list_resp_msg.get("singleSelectReply") or {}).get("selectedRowId")
+                   or _list_resp_msg.get("selectedRowId"))
+
+    # Estrategia 3 — match por título en la lista original del replyTo
+    if not _row_id and message_text:
+        _reply_data = (payload_data.get("replyTo") or {}).get("_data") or {}
+        _list_msg = _reply_data.get("listMessage") or {}
+        for _section in (_list_msg.get("sections") or []):
+            for _row in (_section.get("rows") or []):
+                if _row.get("title") == message_text:
+                    _row_id = str(_row.get("rowId", ""))
+                    break
+            if _row_id:
+                break
+
     if _row_id:
         logger.info("List response detectado → rowId=%r (body era %r)", _row_id, message_text)
         message_text = _row_id.strip()
