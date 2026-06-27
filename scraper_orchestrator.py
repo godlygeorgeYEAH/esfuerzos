@@ -16,6 +16,11 @@ from scrapers.sos_venezuela import SosVenezuelaScraper
 from scrapers.venezreporta import VenezReportaScraper
 from scrapers.terremotove import TerremotoVEScraper as TerremotoveScraper
 from scrapers.google_drive_hospital import GoogleDriveHospitalScraper
+from scrapers.red_solidaria_venezuela import RedSolidariaVenezuelaScraper
+from scrapers.localizados_venezuela import LocalizadosVenezuelaScraper
+from scrapers.venezuela_te_busca import VenezuelaTeBuscaScraper
+from scrapers.sos_laguaira import SosLaGuairaScraper
+from scrapers.pacientes_terremoto import PacientesTerremotoVZLAScraper
 
 logger = logging.getLogger("orchestrator")
 settings = get_settings()
@@ -33,6 +38,11 @@ def _make_scrapers() -> dict:
         "venezreporta": VenezReportaScraper(sb_url, sb_key),
         "terremotove": TerremotoveScraper(),
         "google_drive_hospital": GoogleDriveHospitalScraper(sb_url, sb_key),
+        "red_solidaria_venezuela": RedSolidariaVenezuelaScraper(),
+        "localizados_venezuela": LocalizadosVenezuelaScraper(sb_url, sb_key),
+        "venezuela_te_busca": VenezuelaTeBuscaScraper(sb_url, sb_key),
+        "sos_laguaira": SosLaGuairaScraper(sb_url, sb_key),
+        "pacientes_terremoto": PacientesTerremotoVZLAScraper(),
     }
 
     # Optional scrapers (require API keys)
