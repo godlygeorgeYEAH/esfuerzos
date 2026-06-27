@@ -125,6 +125,29 @@ async def send_message(phone: str, message: str, session: str = "default") -> Op
             return None
 
 
+async def send_list(chat_id: str, session: str, message: dict) -> bool:
+    """Envía un mensaje de lista interactiva vía WAHA /api/sendList.
+
+    `message` debe tener: title, description, footer, button, sections.
+    Retorna True si el envío fue exitoso. Fallback a texto plano si falla.
+    """
+    url = f"{settings.waha_url}/api/sendList"
+    normalized = chat_id if "@" in chat_id else f"{chat_id.lstrip('+')}@c.us"
+    body = {"chatId": normalized, "session": session, "message": message}
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.post(url, json=body, headers=_headers())
+            resp.raise_for_status()
+            logger.info("List message sent to %s", chat_id)
+            return True
+        except httpx.HTTPStatusError as e:
+            logger.error("Failed to send list to %s: %s | %s", chat_id, e, e.response.text)
+            return False
+        except httpx.HTTPError as e:
+            logger.error("Failed to send list to %s: %s", chat_id, e)
+            return False
+
+
 async def resolve_lid_phone(lid_chat_id: str, session: str = "default") -> Optional[str]:
     """Resuelve un chatId @lid al número de teléfono E.164 usando la API de contactos de WAHA.
 

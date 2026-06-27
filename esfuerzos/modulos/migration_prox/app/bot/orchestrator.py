@@ -44,6 +44,64 @@ logger = logging.getLogger(__name__)
 
 ENTRY_NODE = "bienvenida"
 
+# ---------------------------------------------------------------------------
+# Payloads de listas interactivas (WAHA /api/sendList)
+# Las rowIds coinciden exactamente con las claves de next_node_map del FSM.
+# ---------------------------------------------------------------------------
+
+_LIST_BIENVENIDA = {
+    "title": "Reúne",
+    "description": "Hola 🤝 Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n¿Cuál es tu perfil?",
+    "footer": "",
+    "button": "Seleccionar",
+    "sections": [{"title": "Soy...", "rows": [
+        {"title": "Familiar de un desaparecido", "rowId": "1", "description": None},
+        {"title": "Rescatista",                  "rowId": "2", "description": None},
+        {"title": "Hospital o refugio",           "rowId": "3", "description": None},
+    ]}],
+}
+
+_LIST_REPORTE_GUARDADO = {
+    "title": "✅ Reporte registrado",
+    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "footer": "No confirmamos coincidencias sin verificación humana previa.",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Reportar otro familiar",   "rowId": "1",      "description": None},
+        {"title": "Soy rescatista",           "rowId": "2",      "description": None},
+        {"title": "Enviar lista de ingresos", "rowId": "3",      "description": None},
+        {"title": "Menú principal",           "rowId": "inicio", "description": None},
+    ]}],
+}
+
+_LIST_RESCATISTA_GUARDADO = {
+    "title": "✅ Caso registrado",
+    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "footer": "",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Registrar otro caso",      "rowId": "reporte", "description": None},
+        {"title": "Soy familiar",             "rowId": "1",       "description": None},
+        {"title": "Enviar lista de ingresos", "rowId": "3",       "description": None},
+        {"title": "Menú principal",           "rowId": "inicio",  "description": None},
+    ]}],
+}
+
+_LIST_HOSPITAL_NAV_ROWS = [
+    {"title": "Cambiar institución", "rowId": "cambiar", "description": None},
+    {"title": "Menú principal",      "rowId": "inicio",  "description": None},
+]
+
+
+def _hospital_nav_list(title: str, description: str) -> dict:
+    return {
+        "title": title,
+        "description": description,
+        "footer": "",
+        "button": "Opciones",
+        "sections": [{"title": "Navegación", "rows": _LIST_HOSPITAL_NAV_ROWS}],
+    }
+
 
 class Orchestrator:
     def __init__(self, db: Session):
@@ -54,6 +112,7 @@ class Orchestrator:
         self.context_manager = ContextManager()
         self.response_generator = ResponseGenerator()
         self.analytics_logger = AnalyticsLogger(db)
+        self._pending_list: Optional[dict] = None  # payload para sendList; el webhook lo lee tras process_message
 
     async def process_message(
         self,
@@ -63,6 +122,7 @@ class Orchestrator:
         media_url: Optional[str] = None,
         waha_chat_id: Optional[str] = None,
     ) -> Tuple[str, bool]:
+        self._pending_list = None  # reset por cada mensaje
         dlog("ORCHESTRATOR", "INICIO",
              operacion_id=operacion_id,
              phone=client_phone,
@@ -137,13 +197,15 @@ class Orchestrator:
 
         # --- Escape global: "inicio" reinicia desde cualquier nodo ---
         if (message_text or "").strip().lower() == "inicio":
+            prev_node = conversation.current_node_key or "?"
             context = self.context_manager.get(conversation)
             context.clear()
             conversation.context = json.dumps(context)
             conversation.current_node_key = "bienvenida"
             bienvenida_node = self.engine._get_node_by_key(operacion_id, "bienvenida")
             response = self.engine._generate_response(bienvenida_node, operacion_id, conversation) if bienvenida_node else "Hola, soy Reúne. Escribe 1, 2 o 3 para continuar."
-            logger.info("[BOT] phone=%s → inicio (reinicio desde %s)", conversation.client_phone, conversation.current_node_key or "?")
+            self._pending_list = _LIST_BIENVENIDA
+            logger.info("[BOT] phone=%s → inicio (reinicio desde %s)", conversation.client_phone, prev_node)
             self._save_bot_message(conversation, response, "bienvenida", ai_generated=False, ai_confidence=None)
             return response, True
 
@@ -266,6 +328,7 @@ class Orchestrator:
         if target_node_key == "fallback":
             dlog("ORCHESTRATOR", "Fallback activado", razon=razon)
             response = self.engine._handle_fallback(conversation, message_text)
+            self._pending_list = _LIST_BIENVENIDA
             self.context_manager.update(conversation, intent_result, message_text)
             self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
             self.analytics_logger.log_decision(
@@ -282,6 +345,7 @@ class Orchestrator:
         if not next_node:
             logger.warning("Orchestrator: nodo '%s' no encontrado, usando fallback", target_node_key)
             response = self.engine._handle_fallback(conversation, message_text)
+            self._pending_list = _LIST_BIENVENIDA
             self._save_bot_message(conversation, response, "fallback", ai_generated=False, ai_confidence=None)
             return response, True
 
@@ -335,6 +399,15 @@ class Orchestrator:
         )
 
         # --- Paso 13: Guardar mensaje del bot + commit ---
+        _list_map = {
+            "bienvenida":          _LIST_BIENVENIDA,
+            "fallback":            _LIST_BIENVENIDA,
+            "reporte_guardado":    _LIST_REPORTE_GUARDADO,
+            "rescatista_guardado": _LIST_RESCATISTA_GUARDADO,
+        }
+        if next_node.node_key in _list_map:
+            self._pending_list = _list_map[next_node.node_key]
+
         if next_node.node_key == "escalado_humano":
             conversation.status = "escalated"
 
@@ -477,8 +550,11 @@ class Orchestrator:
         response = (
             f"✅ Reportando para *{nombre}*.\n\n"
             "Envía fotos de las listas de ingresos cuando puedas — "
-            "cada registro ayuda a conectar familias.\n\n"
-            "Escribe *cambiar* si necesitas reportar otra institución."
+            "cada registro ayuda a conectar familias."
+        )
+        self._pending_list = _hospital_nav_list(
+            title=f"Reportando para {nombre}",
+            description="Envía fotos de las listas de ingresos cuando puedas — cada registro ayuda a conectar familias.",
         )
 
         logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
@@ -519,12 +595,20 @@ class Orchestrator:
             self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
-            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏\n\nEscribe *cambiar* para reportar otra institución o *inicio* para volver al menú principal."
+            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
+            self._pending_list = _hospital_nav_list(
+                title=f"📋 Lista recibida ({lista_count})",
+                description="Puedes seguir enviando más. Muchas gracias. 🙏",
+            )
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
         logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
-        response = "Para enviar listas adjunta una foto. Escribe *cambiar* para reportar otra institución o *inicio* para volver al menú principal. 🙏"
+        response = "Para enviar listas adjunta una foto."
+        self._pending_list = _hospital_nav_list(
+            title="Listas de ingresos",
+            description="Para enviar listas adjunta una foto.",
+        )
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
@@ -647,6 +731,7 @@ class Orchestrator:
         else:
             response = "✅ Caso registrado. Escribe *reporte* para registrar otro."
 
+        self._pending_list = _LIST_RESCATISTA_GUARDADO
         conversation.current_node_key = "rescatista_guardado"
         self._save_bot_message(conversation, response, "rescatista_guardado", ai_generated=False, ai_confidence=None)
         return response, True

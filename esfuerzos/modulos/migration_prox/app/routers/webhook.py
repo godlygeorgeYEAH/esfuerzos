@@ -166,11 +166,21 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         waha_chat_id=chat_id or None,
     )
 
-    if should_send and response:
-        from app.services.waha import send_message as waha_send
-        sent = await waha_send(phone=chat_id, message=response, session=session_name)
-        logger.info("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
-    else:
-        logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
+    sent = False
+    if should_send:
+        list_payload = orchestrator._pending_list
+        if list_payload:
+            from app.services.waha import send_list as waha_send_list, send_message as waha_send
+            sent = await waha_send_list(chat_id=chat_id, session=session_name, message=list_payload)
+            if not sent and response:
+                # fallback a texto plano si sendList falla
+                sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
+            logger.info("WAHA sendList → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        elif response:
+            from app.services.waha import send_message as waha_send
+            sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
+            logger.info("WAHA sendText → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        else:
+            logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
 
-    return {"status": "processed", "sent": should_send and bool(response)}
+    return {"status": "processed", "sent": sent}
