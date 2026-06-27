@@ -88,7 +88,7 @@ _LIST_RESCATISTA_GUARDADO = {
 }
 
 _LIST_HOSPITAL_NAV_ROWS = [
-    {"title": "Cambiar institución", "rowId": "cambiar", "description": None},
+    {"title": "Cambiar Hospital o Institución", "rowId": "cambiar", "description": None},
     {"title": "Menú principal",      "rowId": "inicio",  "description": None},
 ]
 
