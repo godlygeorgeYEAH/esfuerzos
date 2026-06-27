@@ -24,6 +24,17 @@ async def ensure_default_session(retries: int = 15, delay: float = 2.0) -> bool:
         "events": ["message", "message.any"],
     }
 
+    # Config completa de sesión: webhook + NOWEB store para resolución @lid
+    session_config = {
+        "webhooks": [webhook_payload],
+        "noweb": {
+            "store": {
+                "enabled": True,
+                "full_sync": True,
+            }
+        },
+    }
+
     for attempt in range(1, retries + 1):
         try:
             async with httpx.AsyncClient(timeout=5) as client:
@@ -32,41 +43,43 @@ async def ensure_default_session(retries: int = 15, delay: float = 2.0) -> bool:
 
                 if resp.status_code == 200:
                     data = resp.json()
-                    existing_webhooks = (data.get("config") or {}).get("webhooks") or []
+                    cfg = data.get("config") or {}
+                    existing_webhooks = cfg.get("webhooks") or []
                     expected_events = set(webhook_payload["events"])
-                    # Verificar que haya exactamente un webhook con la URL y eventos correctos.
-                    # Si hay más de uno (duplicados) o los eventos son incorrectos, siempre reemplazar.
                     correct = [
                         w for w in existing_webhooks
                         if w.get("url") == webhook_url and set(w.get("events") or []) >= expected_events
                     ]
-                    if len(correct) == 1 and len(existing_webhooks) == 1:
+                    noweb_store = (cfg.get("noweb") or {}).get("store") or {}
+                    store_ok = noweb_store.get("enabled") and noweb_store.get("full_sync")
+
+                    if len(correct) == 1 and len(existing_webhooks) == 1 and store_ok:
                         logger.info("WAHA session '%s' already configured correctly.", session_name)
                         return True
-                    # Reemplazar webhooks — elimina duplicados y configs incorrectas
+                    # Reemplazar config — webhooks + noweb store
                     patch_resp = await client.patch(
                         session_url,
-                        json={"config": {"webhooks": [webhook_payload]}},
+                        json={"config": session_config},
                         headers=_headers(),
                     )
                     if patch_resp.status_code in (200, 201):
-                        logger.info("WAHA session '%s' webhook replaced → %s.", session_name, webhook_url)
+                        logger.info("WAHA session '%s' config patched (webhook + noweb store).", session_name)
                         return True
                     logger.warning("WAHA PATCH session returned %s.", patch_resp.status_code)
 
                 elif resp.status_code == 404:
-                    # Sesión no existe — crearla
+                    # Sesión no existe — crearla con config completa
                     create_resp = await client.post(
                         sessions_url,
                         json={
                             "name": session_name,
-                            "config": {"webhooks": [webhook_payload]},
+                            "config": session_config,
                             "start": True,
                         },
                         headers=_headers(),
                     )
                     if create_resp.status_code in (200, 201):
-                        logger.info("WAHA session '%s' created with webhook %s.", session_name, webhook_url)
+                        logger.info("WAHA session '%s' created (webhook + noweb store).", session_name)
                         return True
                     logger.warning("WAHA POST session returned %s: %s", create_resp.status_code, create_resp.text)
 
@@ -123,6 +136,29 @@ async def send_message(phone: str, message: str, session: str = "default") -> Op
         except httpx.HTTPError as e:
             logger.error("Failed to send message to %s: %s", phone, e)
             return None
+
+
+async def send_list(chat_id: str, session: str, message: dict) -> bool:
+    """Envía un mensaje de lista interactiva vía WAHA /api/sendList.
+
+    `message` debe tener: title, description, footer, button, sections.
+    Retorna True si el envío fue exitoso. Fallback a texto plano si falla.
+    """
+    url = f"{settings.waha_url}/api/sendList"
+    normalized = chat_id if "@" in chat_id else f"{chat_id.lstrip('+')}@c.us"
+    body = {"chatId": normalized, "session": session, "message": message}
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.post(url, json=body, headers=_headers())
+            resp.raise_for_status()
+            logger.info("List message sent to %s", chat_id)
+            return True
+        except httpx.HTTPStatusError as e:
+            logger.error("Failed to send list to %s: %s | %s", chat_id, e, e.response.text)
+            return False
+        except httpx.HTTPError as e:
+            logger.error("Failed to send list to %s: %s", chat_id, e)
+            return False
 
 
 async def resolve_lid_phone(lid_chat_id: str, session: str = "default") -> Optional[str]:

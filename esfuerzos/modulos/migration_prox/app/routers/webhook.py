@@ -115,10 +115,29 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     message_text = (payload_data.get("body") or "").strip()
 
+    # Respuesta de lista interactiva — WAHA envía el título de la fila en body
+    # pero el rowId (que el FSM necesita) viene en listResponse.
+    # Reemplazamos message_text con el rowId para que la navegación funcione.
+    _list_resp = payload_data.get("listResponse") or {}
+    _row_id = (_list_resp.get("singleSelectReply") or {}).get("selectedRowId") or _list_resp.get("selectedRowId")
+    if _row_id:
+        logger.info("List response detectado → rowId=%r (body era %r)", _row_id, message_text)
+        message_text = _row_id.strip()
+
     # Extraer media (comprobante de pago u otro archivo adjunto)
     media_url: str | None = None
     if payload_data.get("hasMedia") or payload_data.get("mediaUrl"):
         media_url = payload_data.get("mediaUrl") or payload_data.get("media", {}).get("url")
+
+    # Ubicación GPS — tiene prioridad sobre el body (que puede ser thumbnail JPEG)
+    if payload_data.get("location"):
+        loc = payload_data["location"]
+        lat = loc.get("latitude", "")
+        lng = loc.get("longitude", "")
+        desc = (loc.get("description") or loc.get("name") or "").strip()
+        message_text = f"{desc} (GPS: {lat}, {lng})" if desc else f"GPS: {lat}, {lng}"
+        media_url = None  # descartar el thumbnail, no es una foto útil
+        logger.info("Ubicación GPS recibida → '%s'", message_text)
 
     # Ignorar si no hay texto ni media
     if not message_text and not media_url:
@@ -156,11 +175,21 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         waha_chat_id=chat_id or None,
     )
 
-    if should_send and response:
-        from app.services.waha import send_message as waha_send
-        sent = await waha_send(phone=chat_id, message=response, session=session_name)
-        logger.info("WAHA send → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
-    else:
-        logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
+    sent = False
+    if should_send:
+        list_payload = orchestrator._pending_list
+        if list_payload:
+            from app.services.waha import send_list as waha_send_list, send_message as waha_send
+            sent = await waha_send_list(chat_id=chat_id, session=session_name, message=list_payload)
+            if not sent and response:
+                # fallback a texto plano si sendList falla
+                sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
+            logger.info("WAHA sendList → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        elif response:
+            from app.services.waha import send_message as waha_send
+            sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
+            logger.info("WAHA sendText → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
+        else:
+            logger.info("WAHA send omitido → should_send=%s response_len=%d", should_send, len(response or ""))
 
-    return {"status": "processed", "sent": should_send and bool(response)}
+    return {"status": "processed", "sent": sent}

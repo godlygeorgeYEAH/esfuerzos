@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment (NEVER commit)
+.env
+*.env
+
+# SQLite databases (legal/privacy risk)
+*.db
+*.sqlite
+*.sqlite3
+
+# ML model caches
+.insightface/
+.cache/
+
+# Misc
+*.log
+*.tmp
+.DS_Store

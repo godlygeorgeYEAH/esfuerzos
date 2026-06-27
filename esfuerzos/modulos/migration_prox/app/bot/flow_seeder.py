@@ -51,14 +51,11 @@ DEFAULT_NODES = [
         "node_type": "intake_guide",
         "order_position": 2,
         "message_template": (
-            "Vamos a registrar el reporte en 3 pasos:\n\n"
-            "*1.* Datos de la persona\n"
-            "*2.* Una o varias fotos\n"
-            "*3.* Notas adicionales (opcional)\n\n"
-            "Envíame en *un solo mensaje*:\n"
-            "› Nombre completo\n"
-            "› Género\n"
-            "› Edad\n"
+            "Vamos a registrar el reporte en 3 pasos.\n\n"
+            "Para el primer paso, envíame *un solo mensaje* con esta información:\n\n"
+            "› El nombre completo de a quien estás reportando\n\n"
+            "› El género de la persona que estás reportando\n\n"
+            "› La edad de la persona que estás reportando\n\n"
             "› Última ubicación conocida\n\n"
             "_Ejemplo: María García, femenino, 34, Cumaná centro_"
         ),
@@ -112,7 +109,11 @@ DEFAULT_NODES = [
             "✅ *Reporte registrado.*\n\n"
             "Nuestro equipo lo revisará. No confirmaremos coincidencias "
             "sin verificación humana previa.\n\n"
-            "Escribe *reporte* en cualquier momento para registrar otro caso."
+            "¿Qué deseas hacer ahora?\n"
+            "*1* — Reportar otro familiar\n"
+            "*2* — Soy rescatista\n"
+            "*3* — Enviar lista de ingresos\n\n"
+            "O escribe *inicio* para volver al menú principal."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
@@ -125,44 +126,91 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 6. Guía rescatista — placeholder
+    # 6. Guía rescatista — intake permisivo: imagen y/o texto, TTL 60 s
     # ------------------------------------------------------------------
     {
         "node_key": "guia_rescatista",
-        "node_type": "placeholder",
+        "node_type": "rescatista_intake",
         "order_position": 6,
         "message_template": (
-            "Gracias por tu apoyo 🙏\n\n"
-            "El flujo para rescatistas estará disponible muy pronto.\n"
-            "Un coordinador se pondrá en contacto contigo."
+            "Gracias por comunicarte, rescatista. 🙏\n\n"
+            "Lo que más ayuda a la familia:\n\n"
+            "📸 Una foto si puedes\n"
+            "📍 Dónde está exactamente (refugio, hospital, dirección)\n"
+            "❤️ Cómo está (consciente, herida, estable)\n"
+            "🪪 Su nombre, si puede decírtelo\n\n"
+            "Envía la información en el orden que puedas, nosotros la organizamos."
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 7. Guía hospital — placeholder
+    # 7. Rescatista guardado — confirmación
+    # ------------------------------------------------------------------
+    {
+        "node_key": "rescatista_guardado",
+        "node_type": "rescatista_saved",
+        "order_position": 7,
+        "message_template": (
+            "✅ *Caso registrado.*\n\n"
+            "Nuestro equipo lo revisará.\n\n"
+            "¿Qué deseas hacer ahora?\n"
+            "*reporte* — Registrar otro caso\n"
+            "*1* — Soy familiar\n"
+            "*3* — Enviar lista de ingresos\n\n"
+            "O escribe *inicio* para volver al menú principal."
+        ),
+        "expected_responses": None,
+        "next_node_map": json.dumps({
+            "reporte": "guia_rescatista",
+            "1": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
+            "default": "guia_rescatista",
+        }),
+    },
+
+    # ------------------------------------------------------------------
+    # 8. Guía hospital — solicita nombre de la institución
     # ------------------------------------------------------------------
     {
         "node_key": "guia_hospital",
-        "node_type": "placeholder",
-        "order_position": 7,
+        "node_type": "hospital_location",
+        "order_position": 8,
         "message_template": (
-            "Gracias por contactarnos 🏥\n\n"
-            "El flujo para hospitales y refugios estará disponible muy pronto.\n"
-            "Un coordinador se pondrá en contacto contigo."
+            "Gracias por contribuir 🙏\n\n"
+            "Los registros de ingresos son una herramienta invaluable para conectar "
+            "a las familias con sus seres queridos.\n\n"
+            "¿Cómo se llama el hospital, refugio o institución que vas a reportar?"
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 8. Fallback — no entendió; retoma con 1/2/3
+    # 9. Hospital registrado — recibe fotos de listas de ingresos
+    # ------------------------------------------------------------------
+    {
+        "node_key": "hospital_registrado",
+        "node_type": "hospital_registered",
+        "order_position": 9,
+        "message_template": (
+            "Cuando puedas, envía fotos de las listas de ingresos — "
+            "cualquier registro de personas admitidas ayuda enormemente.\n\n"
+            "Escribe *cambiar* si necesitas reportar otra institución."
+        ),
+        "expected_responses": None,
+        "next_node_map": None,
+    },
+
+    # ------------------------------------------------------------------
+    # 10. Fallback — no entendió; retoma con 1/2/3
     # ------------------------------------------------------------------
     {
         "node_key": "fallback",
         "node_type": "fallback",
-        "order_position": 8,
+        "order_position": 10,
         "message_template": (
             "No entendí tu mensaje.\n\n"
             "Escribe el número de tu perfil:\n"

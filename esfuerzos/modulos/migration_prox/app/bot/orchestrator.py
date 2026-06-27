@@ -38,10 +38,69 @@ from app.bot.analytics_logger import AnalyticsLogger
 from app.bot.dev_logger import dlog
 from app.bot.faq_matcher import match_faq
 from app.models.bot import Conversacion, MensajeConversacion
+from app.services.cliente_service import upsert_cliente, set_user_type
 
 logger = logging.getLogger(__name__)
 
 ENTRY_NODE = "bienvenida"
+
+# ---------------------------------------------------------------------------
+# Payloads de listas interactivas (WAHA /api/sendList)
+# Las rowIds coinciden exactamente con las claves de next_node_map del FSM.
+# ---------------------------------------------------------------------------
+
+_LIST_BIENVENIDA = {
+    "title": "Reúne",
+    "description": "Hola 🤝 Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n¿Cuál es tu perfil?",
+    "footer": "",
+    "button": "Seleccionar",
+    "sections": [{"title": "Soy...", "rows": [
+        {"title": "Familiar de un desaparecido", "rowId": "1", "description": None},
+        {"title": "Rescatista",                  "rowId": "2", "description": None},
+        {"title": "Hospital o refugio",           "rowId": "3", "description": None},
+    ]}],
+}
+
+_LIST_REPORTE_GUARDADO = {
+    "title": "✅ Reporte registrado",
+    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "footer": "No confirmamos coincidencias sin verificación humana previa.",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Reportar otro familiar",   "rowId": "1",      "description": None},
+        {"title": "Soy rescatista",           "rowId": "2",      "description": None},
+        {"title": "Enviar lista de ingresos", "rowId": "3",      "description": None},
+        {"title": "Menú principal",           "rowId": "inicio", "description": None},
+    ]}],
+}
+
+_LIST_RESCATISTA_GUARDADO = {
+    "title": "✅ Caso registrado",
+    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "footer": "",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Registrar otro caso",      "rowId": "reporte", "description": None},
+        {"title": "Soy familiar",             "rowId": "1",       "description": None},
+        {"title": "Enviar lista de ingresos", "rowId": "3",       "description": None},
+        {"title": "Menú principal",           "rowId": "inicio",  "description": None},
+    ]}],
+}
+
+_LIST_HOSPITAL_NAV_ROWS = [
+    {"title": "Cambiar institución", "rowId": "cambiar", "description": None},
+    {"title": "Menú principal",      "rowId": "inicio",  "description": None},
+]
+
+
+def _hospital_nav_list(title: str, description: str) -> dict:
+    return {
+        "title": title,
+        "description": description,
+        "footer": "",
+        "button": "Opciones",
+        "sections": [{"title": "Navegación", "rows": _LIST_HOSPITAL_NAV_ROWS}],
+    }
 
 
 class Orchestrator:
@@ -53,6 +112,7 @@ class Orchestrator:
         self.context_manager = ContextManager()
         self.response_generator = ResponseGenerator()
         self.analytics_logger = AnalyticsLogger(db)
+        self._pending_list: Optional[dict] = None  # payload para sendList; el webhook lo lee tras process_message
 
     async def process_message(
         self,
@@ -62,12 +122,17 @@ class Orchestrator:
         media_url: Optional[str] = None,
         waha_chat_id: Optional[str] = None,
     ) -> Tuple[str, bool]:
+        self._pending_list = None  # reset por cada mensaje
         dlog("ORCHESTRATOR", "INICIO",
              operacion_id=operacion_id,
              phone=client_phone,
              waha_chat_id=waha_chat_id,
              mensaje=message_text,
              media=bool(media_url))
+
+        # --- Upsert cliente ---
+        _chat_id_key = waha_chat_id or f"{client_phone}@c.us"
+        upsert_cliente(self.db, _chat_id_key, client_phone)
 
         # --- Paso 1: Cliente bloqueado ---
         is_blocked = self.engine._is_client_blocked(operacion_id, client_phone)
@@ -130,6 +195,20 @@ class Orchestrator:
             dlog("ORCHESTRATOR", "Conversación escalada — bot silenciado")
             return "", False
 
+        # --- Escape global: "inicio" reinicia desde cualquier nodo ---
+        if (message_text or "").strip().lower() == "inicio":
+            prev_node = conversation.current_node_key or "?"
+            context = self.context_manager.get(conversation)
+            context.clear()
+            conversation.context = json.dumps(context)
+            conversation.current_node_key = "bienvenida"
+            bienvenida_node = self.engine._get_node_by_key(operacion_id, "bienvenida")
+            response = self.engine._generate_response(bienvenida_node, operacion_id, conversation) if bienvenida_node else "Hola, soy Reúne. Escribe 1, 2 o 3 para continuar."
+            self._pending_list = _LIST_BIENVENIDA
+            logger.info("[BOT] phone=%s → inicio (reinicio desde %s)", conversation.client_phone, prev_node)
+            self._save_bot_message(conversation, response, "bienvenida", ai_generated=False, ai_confidence=None)
+            return response, True
+
         # --- Paso 6: Obtener nodo actual ---
         current_node = self.engine._get_current_node(conversation)
 
@@ -149,7 +228,25 @@ class Orchestrator:
              node_key=current_node.node_key,
              expected_responses=current_node.expected_responses or "ninguna")
 
-        # --- Paso 6c: Nodo pedir_foto — TTL + descarga de fotos ---
+        # --- Paso 6c: Nodo guia_hospital — registra ubicación y avanza ---
+        if current_node and current_node.node_key == "guia_hospital":
+            return await self._handle_hospital_location(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo hospital_registrado — recibe fotos de listas ---
+        if current_node and current_node.node_key == "hospital_registrado":
+            return await self._handle_hospital_lista(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6e: Nodo guia_rescatista — imagen y/o texto, TTL 60 s ---
+        if current_node and current_node.node_key == "guia_rescatista":
+            return await self._handle_rescatista_intake(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo pedir_foto — TTL + descarga de fotos ---
         if current_node and current_node.node_key == "pedir_foto":
             return await self._handle_pedir_foto(
                 conversation, operacion_id, message_text, media_url
@@ -225,9 +322,13 @@ class Orchestrator:
              razon=razon,
              metodo=metodo)
 
+        if current_node.node_key == "bienvenida":
+            set_user_type(self.db, _chat_id_key, target_node_key)
+
         if target_node_key == "fallback":
             dlog("ORCHESTRATOR", "Fallback activado", razon=razon)
             response = self.engine._handle_fallback(conversation, message_text)
+            self._pending_list = _LIST_BIENVENIDA
             self.context_manager.update(conversation, intent_result, message_text)
             self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
             self.analytics_logger.log_decision(
@@ -244,6 +345,7 @@ class Orchestrator:
         if not next_node:
             logger.warning("Orchestrator: nodo '%s' no encontrado, usando fallback", target_node_key)
             response = self.engine._handle_fallback(conversation, message_text)
+            self._pending_list = _LIST_BIENVENIDA
             self._save_bot_message(conversation, response, "fallback", ai_generated=False, ai_confidence=None)
             return response, True
 
@@ -297,6 +399,15 @@ class Orchestrator:
         )
 
         # --- Paso 13: Guardar mensaje del bot + commit ---
+        _list_map = {
+            "bienvenida":          _LIST_BIENVENIDA,
+            "fallback":            _LIST_BIENVENIDA,
+            "reporte_guardado":    _LIST_REPORTE_GUARDADO,
+            "rescatista_guardado": _LIST_RESCATISTA_GUARDADO,
+        }
+        if next_node.node_key in _list_map:
+            self._pending_list = _list_map[next_node.node_key]
+
         if next_node.node_key == "escalado_humano":
             conversation.status = "escalated"
 
@@ -397,6 +508,232 @@ class Orchestrator:
         dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
              fotos=photo_count, motivo=motivo)
         self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Hospital — registro de ubicación + recepción de listas
+    # ------------------------------------------------------------------
+
+    async def _handle_hospital_location(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        import re
+        from app.services.hospital_service import upsert_hospital
+
+        if not message_text:
+            response = "Por favor escribe el nombre del hospital, refugio o institución que vas a reportar."
+            self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        lat, lng, nombre = None, None, None
+        gps_match = re.search(r'GPS:\s*([-\d.]+),\s*([-\d.]+)', message_text)
+        if gps_match:
+            lat = float(gps_match.group(1))
+            lng = float(gps_match.group(2))
+            nombre = message_text.split(" (GPS:")[0].strip() or message_text.strip()
+        else:
+            nombre = message_text.strip()
+
+        wa_chat_id = conversation.waha_chat_id or conversation.client_phone
+        upsert_hospital(wa_chat_id, nombre, message_text, lat, lng)
+
+        context = self.context_manager.get(conversation)
+        context["hospital_nombre"] = nombre
+        context.pop("hospital_lista_count", None)
+        conversation.context = json.dumps(context)
+
+        conversation.current_node_key = "hospital_registrado"
+        response = (
+            f"✅ Reportando para *{nombre}*.\n\n"
+            "Envía fotos de las listas de ingresos cuando puedas — "
+            "cada registro ayuda a conectar familias."
+        )
+        self._pending_list = _hospital_nav_list(
+            title=f"Reportando para {nombre}",
+            description="Envía fotos de las listas de ingresos cuando puedas — cada registro ayuda a conectar familias.",
+        )
+
+        logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    async def _handle_hospital_lista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        from app.services.hospital_service import add_lista
+
+        # Cambiar de institución
+        if (message_text or "").strip().lower() == "cambiar":
+            context = self.context_manager.get(conversation)
+            context.pop("hospital_nombre", None)
+            context.pop("hospital_lista_count", None)
+            conversation.context = json.dumps(context)
+            conversation.current_node_key = "guia_hospital"
+            guia_node = self.engine._get_node_by_key(operacion_id, "guia_hospital")
+            response = self.engine._generate_response(guia_node, operacion_id, conversation) if guia_node else "¿Cómo se llama el hospital o institución que vas a reportar?"
+            logger.info("[BOT] phone=%s hospital_registrado → cambiar → guia_hospital", conversation.client_phone)
+            self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        if media_url:
+            wa_chat_id = conversation.waha_chat_id or conversation.client_phone
+            local_path = await self._download_photo(media_url, conversation.id, 0)
+            add_lista(wa_chat_id, media_url, local_path)
+
+            context = self.context_manager.get(conversation)
+            lista_count = context.get("hospital_lista_count", 0) + 1
+            context["hospital_lista_count"] = lista_count
+            conversation.context = json.dumps(context)
+            self.db.commit()
+
+            logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
+            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
+            self._pending_list = _hospital_nav_list(
+                title=f"📋 Lista recibida ({lista_count})",
+                description="Puedes seguir enviando más. Muchas gracias. 🙏",
+            )
+            self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
+        response = "Para enviar listas adjunta una foto."
+        self._pending_list = _hospital_nav_list(
+            title="Listas de ingresos",
+            description="Para enviar listas adjunta una foto.",
+        )
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Rescatista — imagen y/o texto, TTL 60 s
+    # ------------------------------------------------------------------
+
+    async def _handle_rescatista_intake(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        context = self.context_manager.get(conversation)
+        pending_photos: list = context.get("pending_photos", [])
+        last_photo_at_str: Optional[str] = context.get("last_photo_at")
+
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, len(pending_photos))
+            pending_photos.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["pending_photos"] = pending_photos
+            context["last_photo_at"] = datetime.utcnow().isoformat()
+
+            caption = (message_text or "").strip()
+            if caption:
+                existing = context.get("intake_person_raw", "")
+                context["intake_person_raw"] = (existing + "\n" + caption).strip() if existing else caption
+
+            conversation.context = json.dumps(context)
+            count = len(pending_photos)
+
+            if caption:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen+caption recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Imagen recibida. Leí tu mensaje:\n"
+                    f"_{caption}_\n\n"
+                    "Puedes agregar más texto o enviar más fotos.\n"
+                    "Escribe *listo* para terminar este reporte."
+                )
+            else:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Imagen recibida ({count}).\n\n"
+                    "Puedes enviar más fotos o escribir texto para complementar el reporte.\n"
+                    "Escribe *listo* cuando termines."
+                )
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # — Texto —
+        text = (message_text or "").strip().lower()
+
+        # TTL: si hay fotos y pasaron 60 s desde la última → auto-commit
+        if pending_photos and last_photo_at_str:
+            try:
+                last_photo_at = datetime.fromisoformat(last_photo_at_str)
+                elapsed = (datetime.utcnow() - last_photo_at).total_seconds()
+                if elapsed >= 60:
+                    logger.info("[BOT] phone=%s guia_rescatista → TTL expirado (%.0fs)", conversation.client_phone, elapsed)
+                    return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "ttl_expired")
+            except Exception:
+                pass
+
+        if text == "listo":
+            logger.info("[BOT] phone=%s guia_rescatista → listo", conversation.client_phone)
+            return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "listo")
+
+        if text == "reporte":
+            context.pop("pending_photos", None)
+            context.pop("last_photo_at", None)
+            context.pop("intake_person_raw", None)
+            conversation.context = json.dumps(context)
+            guia_node = self.engine._get_node_by_key(operacion_id, "guia_rescatista")
+            response = self.engine._generate_response(guia_node, operacion_id, conversation) if guia_node else "Puedes enviar una nueva foto o descripción."
+            logger.info("[BOT] phone=%s guia_rescatista → reporte (reinicio)", conversation.client_phone)
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Texto libre
+        context["intake_person_raw"] = message_text
+        conversation.context = json.dumps(context)
+
+        if not pending_photos:
+            response = (
+                "📝 Descripción recibida.\n\n"
+                "Si tienes una foto, envíala ahora.\n"
+                "Escribe *listo* para registrar sin foto, o *reporte* para iniciar otro caso."
+            )
+        else:
+            response = (
+                f"📝 Descripción guardada. Tienes {len(pending_photos)} foto(s).\n"
+                "Escribe *listo* para finalizar o envía más fotos."
+            )
+
+        logger.info("[BOT] phone=%s guia_rescatista → texto libre (fotos=%d)", conversation.client_phone, len(pending_photos))
+        self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    def _advance_rescatista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        context: dict,
+        photo_count: int,
+        motivo: str,
+    ) -> Tuple[str, bool]:
+        from app.core.intake import commit_report
+        _report = commit_report(self.db, conversation, conversation.client_phone, kind="found")
+        if _report:
+            dlog("ORCHESTRATOR", "Rescatista: report creado", report_id=_report.id, fotos=photo_count, motivo=motivo)
+
+        guardado_node = self.engine._get_node_by_key(operacion_id, "rescatista_guardado")
+        if guardado_node:
+            response = self.engine._generate_response(guardado_node, operacion_id, conversation)
+        else:
+            response = "✅ Caso registrado. Escribe *reporte* para registrar otro."
+
+        self._pending_list = _LIST_RESCATISTA_GUARDADO
+        conversation.current_node_key = "rescatista_guardado"
+        self._save_bot_message(conversation, response, "rescatista_guardado", ai_generated=False, ai_confidence=None)
         return response, True
 
     async def _download_photo(
