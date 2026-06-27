@@ -115,6 +115,11 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     message_text = (payload_data.get("body") or "").strip()
 
+    # DEBUG TEMPORAL — loguear payload completo para identificar estructura de list response
+    import json as _json
+    logger.info("DEBUG payload_data keys: %s", list(payload_data.keys()))
+    logger.info("DEBUG payload_data: %s", _json.dumps(payload_data, default=str)[:1000])
+
     # Respuesta de lista interactiva — WAHA envía el título de la fila en body
     # pero el rowId (que el FSM necesita) viene en listResponse.
     # Reemplazamos message_text con el rowId para que la navegación funcione.
