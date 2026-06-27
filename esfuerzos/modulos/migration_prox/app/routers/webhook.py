@@ -57,8 +57,11 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     payload = await request.json()
 
-    event_id = payload.get("id", "")
-    if _is_duplicate(event_id):
+    # Dedup por ID del mensaje WhatsApp (payload.payload.id), no por el ID de
+    # entrega de WAHA (payload.id) — dos webhooks registrados generan distintos
+    # delivery IDs para el mismo mensaje subyacente.
+    wa_msg_id = (payload.get("payload") or {}).get("id") or payload.get("id", "")
+    if _is_duplicate(wa_msg_id):
         return {"status": "ignored", "reason": "duplicate_event_id"}
 
     session_name = payload.get("session", "default")

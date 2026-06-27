@@ -34,21 +34,23 @@ async def ensure_default_session(retries: int = 15, delay: float = 2.0) -> bool:
                     data = resp.json()
                     existing_webhooks = (data.get("config") or {}).get("webhooks") or []
                     expected_events = set(webhook_payload["events"])
-                    already_correct = any(
-                        w.get("url") == webhook_url and set(w.get("events") or []) >= expected_events
-                        for w in existing_webhooks
-                    )
-                    if already_correct:
+                    # Verificar que haya exactamente un webhook con la URL y eventos correctos.
+                    # Si hay más de uno (duplicados) o los eventos son incorrectos, siempre reemplazar.
+                    correct = [
+                        w for w in existing_webhooks
+                        if w.get("url") == webhook_url and set(w.get("events") or []) >= expected_events
+                    ]
+                    if len(correct) == 1 and len(existing_webhooks) == 1:
                         logger.info("WAHA session '%s' already configured correctly.", session_name)
                         return True
-                    # Sesión existe pero webhook incorrecto — actualizar vía PATCH
+                    # Reemplazar webhooks — elimina duplicados y configs incorrectas
                     patch_resp = await client.patch(
                         session_url,
                         json={"config": {"webhooks": [webhook_payload]}},
                         headers=_headers(),
                     )
                     if patch_resp.status_code in (200, 201):
-                        logger.info("WAHA session '%s' webhook updated to %s.", session_name, webhook_url)
+                        logger.info("WAHA session '%s' webhook replaced → %s.", session_name, webhook_url)
                         return True
                     logger.warning("WAHA PATCH session returned %s.", patch_resp.status_code)
 
