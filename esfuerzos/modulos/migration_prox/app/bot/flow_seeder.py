@@ -88,12 +88,13 @@ DEFAULT_NODES = [
         "order_position": 4,
         "message_template": (
             "📸 Imágenes recibidas.\n\n"
-            "¿Tienes señas, ropa u otros detalles? Escríbelos ahora.\n\n"
-            "O escribe *reporte* para registrar un nuevo caso."
+            "¿Tienes señas, ropa u otros detalles del reportado? Escríbelos ahora."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
             "reporte": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
             "default": "reporte_guardado",
         }),
     },

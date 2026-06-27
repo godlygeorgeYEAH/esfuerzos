@@ -87,6 +87,19 @@ _LIST_RESCATISTA_GUARDADO = {
     ]}],
 }
 
+_LIST_NOTAS_ADICIONALES = {
+    "title": "👇 O elige alguna de estas opciones",
+    "description": "Puedes continuar escribiendo detalles arriba.",
+    "footer": "",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Reportar otra persona",               "rowId": "reporte", "description": None},
+        {"title": "Soy rescatista",                      "rowId": "2",       "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
+    ]}],
+}
+
 _LIST_HOSPITAL_NAV_ROWS = [
     {"title": "Cambiar Hospital o Institución", "rowId": "cambiar", "description": None},
     {"title": "Menú principal",      "rowId": "inicio",  "description": None},
@@ -406,9 +419,13 @@ class Orchestrator:
             "fallback":            _LIST_BIENVENIDA,
             "reporte_guardado":    _LIST_REPORTE_GUARDADO,
             "rescatista_guardado": _LIST_RESCATISTA_GUARDADO,
+            "notas_adicionales":   _LIST_NOTAS_ADICIONALES,
         }
         if next_node.node_key in _list_map:
             self._pending_list = _list_map[next_node.node_key]
+            # Nodos que envían el texto informativo separado del menú de navegación
+            if next_node.node_key in {"notas_adicionales"}:
+                self._pre_list_message = response
 
         if next_node.node_key == "escalado_humano":
             conversation.status = "escalated"
