@@ -154,7 +154,19 @@ class Orchestrator:
              node_key=current_node.node_key,
              expected_responses=current_node.expected_responses or "ninguna")
 
-        # --- Paso 6c: Nodo guia_rescatista — imagen y/o texto, TTL 60 s ---
+        # --- Paso 6c: Nodo guia_hospital — registra ubicación y avanza ---
+        if current_node and current_node.node_key == "guia_hospital":
+            return await self._handle_hospital_location(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo hospital_registrado — recibe fotos de listas ---
+        if current_node and current_node.node_key == "hospital_registrado":
+            return await self._handle_hospital_lista(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6e: Nodo guia_rescatista — imagen y/o texto, TTL 60 s ---
         if current_node and current_node.node_key == "guia_rescatista":
             return await self._handle_rescatista_intake(
                 conversation, operacion_id, message_text, media_url
@@ -414,6 +426,63 @@ class Orchestrator:
         return response, True
 
     # ------------------------------------------------------------------
+    # Hospital — registro de ubicación + recepción de listas
+    # ------------------------------------------------------------------
+
+    async def _handle_hospital_location(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        if not message_text:
+            response = "Por favor envíen el nombre y ubicación de su hospital o refugio, o compartan su ubicación por WhatsApp."
+            self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        context = self.context_manager.get(conversation)
+        context["hospital_location"] = message_text
+        conversation.context = json.dumps(context)
+        conversation.current_node_key = "hospital_registrado"
+
+        registrado_node = self.engine._get_node_by_key(operacion_id, "hospital_registrado")
+        response = self.engine._generate_response(registrado_node, operacion_id, conversation) if registrado_node else "✅ Registro completado. Esperamos sus listas de ingresos. 🙏"
+
+        logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (ubicacion=%s)", conversation.client_phone, message_text[:60])
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    async def _handle_hospital_lista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, 0)
+            context = self.context_manager.get(conversation)
+            listas: list = context.get("hospital_listas", [])
+            listas.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["hospital_listas"] = listas
+            conversation.context = json.dumps(context)
+            logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, len(listas))
+            response = f"📋 Lista recibida ({len(listas)}). Puede continuar enviando más. Muchas gracias. 🙏"
+            self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Texto — acusar recibo sin avanzar
+        logger.info("[BOT] phone=%s hospital_registrado → texto ignorado", conversation.client_phone)
+        response = "Recibido. Cuando tengan listas de ingresos, envíen las fotos y las procesaremos. 🙏"
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
     # Rescatista — imagen y/o texto, TTL 60 s
     # ------------------------------------------------------------------
 
@@ -449,7 +518,8 @@ class Orchestrator:
             if caption:
                 logger.info("[BOT] phone=%s guia_rescatista → imagen+caption recibida (%d)", conversation.client_phone, count)
                 response = (
-                    f"📸 Tomé el caption de tu imagen ({count} foto(s)).\n\n"
+                    f"📸 Imagen recibida. Leí tu mensaje:\n"
+                    f"_{caption}_\n\n"
                     "Puedes agregar más texto o enviar más fotos.\n"
                     "Escribe *listo* para terminar este reporte."
                 )
@@ -457,7 +527,7 @@ class Orchestrator:
                 logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
                 response = (
                     f"📸 Imagen recibida ({count}).\n\n"
-                    "Puedes enviar más fotos.\n"
+                    "Puedes enviar más fotos o escribir texto para complementar el reporte.\n"
                     "Escribe *listo* cuando termines."
                 )
             self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
