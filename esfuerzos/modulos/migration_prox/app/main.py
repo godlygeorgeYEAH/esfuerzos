@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     """Seed del flujo conversacional y configuración de sesión WAHA al arrancar."""
     try:
         from app.database import SessionLocal, Base, engine
-        from app.models import negocio, bot, reporte  # noqa: F401 — registra en Base
+        from app.models import negocio, bot, reporte, cliente  # noqa: F401 — registra en Base
         from app.bot.flow_seeder import seed_default_flow
         from app.models.negocio import Operacion
         from app.models.bot import BotConfig, OperacionFlow, FlowTemplate
