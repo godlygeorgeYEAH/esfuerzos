@@ -275,7 +275,7 @@ async def _text_match_one(
         if not cand_id or cand_id == source_id:
             continue
 
-        text_score = float(cand.get("similarity", 0.0))
+        text_score = float(cand.get("text_similarity") or cand.get("similarity") or 0.0)
         if text_score < TEXT_MATCH_THRESHOLD:
             continue
 

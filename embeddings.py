@@ -1,7 +1,16 @@
 import asyncio
+import html
+import re
 
 import cv2
 import numpy as np
+
+
+def _clean_text(text: str) -> str:
+    """Decode HTML entities and normalize whitespace."""
+    text = html.unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 async def get_text_embedding(text: str, model) -> list[float]:
@@ -35,4 +44,5 @@ def build_text_for_embedding(report: dict) -> str:
         report.get("distinguishing_marks"),
         report.get("clothing"),
     ]
-    return " ".join(p for p in parts if p).strip()
+    text = " ".join(p for p in parts if p).strip()
+    return _clean_text(text)
