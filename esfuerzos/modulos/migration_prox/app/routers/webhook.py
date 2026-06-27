@@ -71,17 +71,20 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         return {"status": "ignored"}
 
     event = payload.get("event", "unknown")
+    payload_data = payload.get("payload", {})
+    is_from_me = payload_data.get("fromMe", False)
+    body_preview = (payload_data.get("body") or "").strip()
+
     logger.info(
-        "WAHA webhook recibido | operacion=%s (id=%d) | session=%s | event=%s",
+        "WAHA webhook recibido | operacion=%s (id=%d) | session=%s | event=%s | from=%s | fromMe=%s | body=%s",
         operacion.slug,
         operacion.id,
         session_name,
         event,
+        payload_data.get("from", "?"),
+        is_from_me,
+        body_preview[:60] or "[media]",
     )
-
-    payload_data = payload.get("payload", {})
-    is_from_me = payload_data.get("fromMe", False)
-    body_preview = (payload_data.get("body") or "").strip()
 
     # WAHA emite dos eventos por cada mensaje entrante: "message" (terceros) y
     # "message.any" (todos, incluido fromMe). Procesar ambos causaría respuestas dobles.
