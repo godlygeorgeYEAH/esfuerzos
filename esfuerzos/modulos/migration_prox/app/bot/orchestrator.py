@@ -210,8 +210,9 @@ class Orchestrator:
             dlog("ORCHESTRATOR", "Conversación escalada — bot silenciado")
             return "", False
 
-        # --- Escape global: "inicio" reinicia desde cualquier nodo ---
-        if (message_text or "").strip().lower() == "inicio":
+        # --- Escape global: "inicio" y saludos comunes reinician desde cualquier nodo ---
+        _RESET_KEYWORDS = {"inicio", "hola", "buenas", "buenos días", "buenas tardes", "buenas noches", "hey", "hi", "hello", "menu", "menú"}
+        if (message_text or "").strip().lower() in _RESET_KEYWORDS:
             prev_node = conversation.current_node_key or "?"
             if prev_node == "notas_adicionales":
                 from app.core.intake import commit_report
@@ -225,7 +226,7 @@ class Orchestrator:
             bienvenida_node = self.engine._get_node_by_key(operacion_id, "bienvenida")
             response = self.engine._generate_response(bienvenida_node, operacion_id, conversation) if bienvenida_node else "Hola, soy Reúne. Escribe 1, 2 o 3 para continuar."
             self._pending_list = _LIST_BIENVENIDA
-            logger.info("[BOT] phone=%s → inicio (reinicio desde %s)", conversation.client_phone, prev_node)
+            logger.info("[BOT] phone=%s → reset '%s' (desde %s)", conversation.client_phone, (message_text or "").strip().lower(), prev_node)
             self._save_bot_message(conversation, response, "bienvenida", ai_generated=False, ai_confidence=None)
             return response, True
 
