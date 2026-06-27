@@ -1,31 +1,41 @@
-# DB — Tabla `clientes`
+# Tabla: clientes (Supabase)
 
-Registra cada persona que contacta el bot. Se crea al primer mensaje recibido.
+Registra cada persona que interactúa con el bot, su tipo de usuario y actividad.
 
-## Esquema
+## SQL — crear en Supabase
+
+```sql
+CREATE TABLE IF NOT EXISTS clientes (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    wa_chat_id     TEXT UNIQUE NOT NULL,
+    phone          TEXT NOT NULL,
+    user_type      TEXT CHECK (user_type IN ('familiar', 'rescatista', 'hospital')),
+    is_blocked     BOOLEAN DEFAULT false,
+    created_at     TIMESTAMPTZ DEFAULT now(),
+    last_seen_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS clientes_phone_idx ON clientes (phone);
+```
+
+## Tipos de usuario
+
+| user_type | Quién es | Nodo que lo activa |
+|---|---|---|
+| `familiar` | Persona buscando a un desaparecido | `guia_familiar` |
+| `rescatista` | Rescatista reportando a alguien encontrado | `guia_rescatista` |
+| `hospital` | Hospital o refugio registrando ingresos | `guia_hospital` |
+| `NULL` | Usuario que no ha elegido perfil aún | — |
+
+El `user_type` se asigna al salir del nodo `bienvenida` cuando el usuario elige 1, 2 o 3.
+
+## Campos
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `id` | int PK | Identificador interno |
-| `wa_chat_id` | str UNIQUE | Chat ID de WAHA (`584...@c.us` o `...@lid`). Clave natural del cliente. |
-| `phone` | str | Número en E.164 (`584244107121`). Resuelto desde `@lid` si aplica. |
-| `user_type` | str nullable | Perfil declarado: `familiar` · `rescatista` · `hospital` |
-| `is_blocked` | bool | `true` = el bot ignora mensajes de este número |
-| `created_at` | timestamptz | Primera interacción |
-| `last_seen_at` | timestamptz | Última interacción |
-
-## Modelo
-
-`esfuerzos/modulos/migration_prox/app/models/cliente.py`
-
-## Relaciones
-
-- `clientes.wa_chat_id` ↔ `conversaciones.waha_chat_id`
-- `clientes.id` → `reports.cliente_id` (pendiente de implementar)
-
-## Pendientes
-
-- Hacer upsert en `clientes` al recibir cada mensaje (registra primera visita y actualiza `last_seen_at`).
-- Poblar `user_type` cuando el usuario elige su perfil en el nodo `bienvenida`.
-- Usar `user_type` persistido para no pedirle al usuario que se identifique de nuevo si el bot se reinicia.
-- Cruzar `is_blocked` en el webhook antes de pasar al orquestador.
+| `wa_chat_id` | TEXT UNIQUE | ID de chat de WAHA (`123456789@c.us`) |
+| `phone` | TEXT | Número de teléfono sin formato |
+| `user_type` | TEXT | Rol elegido por el usuario |
+| `is_blocked` | BOOLEAN | Si el bot ignora sus mensajes |
+| `created_at` | TIMESTAMPTZ | Primera interacción |
+| `last_seen_at` | TIMESTAMPTZ | Último mensaje recibido |
