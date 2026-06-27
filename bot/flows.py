@@ -45,8 +45,8 @@ from typing import Optional
 import httpx
 from supabase import Client, create_client
 
-from api.bot.sessions import BotState, Session, store
-from api.scrapers.base import SearchQuery, parse_age_int
+from bot.sessions import BotState, Session, store
+from scrapers.base import SearchQuery, parse_age_int
 
 logger = logging.getLogger(__name__)
 
