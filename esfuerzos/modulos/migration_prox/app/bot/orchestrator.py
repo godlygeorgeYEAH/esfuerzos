@@ -51,52 +51,65 @@ ENTRY_NODE = "bienvenida"
 
 _LIST_BIENVENIDA = {
     "title": "Reúne",
-    "description": "Hola 🤝 Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n¿Cuál es tu perfil?",
+    "description": "Hola 🤝 Estoy aquí para ayudar a conectar personas tras el sismo.\n\n¿Qué deseas reportar?",
     "footer": "",
     "button": "Seleccionar",
-    "sections": [{"title": "Soy...", "rows": [
-        {"title": "Familiar de un desaparecido", "rowId": "1", "description": None},
-        {"title": "Rescatista",                  "rowId": "2", "description": None},
-        {"title": "Hospital o refugio",           "rowId": "3", "description": None},
+    "sections": [{"title": "Tipo de reporte", "rows": [
+        {"title": "Reporte de desaparecido", "rowId": "1", "description": None},
+        {"title": "Reporte de rescatista",   "rowId": "2", "description": None},
+        {"title": "Hospital o refugio",      "rowId": "3", "description": None},
     ]}],
 }
 
 _LIST_REPORTE_GUARDADO = {
     "title": "✅ Reporte registrado",
-    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "description": "¿Qué deseas hacer ahora?",
     "footer": "No confirmamos coincidencias sin verificación humana previa.",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
-        {"title": "Reportar otro familiar",   "rowId": "1",      "description": None},
-        {"title": "Soy rescatista",           "rowId": "2",      "description": None},
-        {"title": "Enviar lista de ingresos", "rowId": "3",      "description": None},
-        {"title": "Menú principal",           "rowId": "inicio", "description": None},
+        {"title": "Reportar otro desaparecido",          "rowId": "1",      "description": None},
+        {"title": "Reporte de rescatista",               "rowId": "2",      "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",      "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio", "description": None},
     ]}],
 }
 
 _LIST_RESCATISTA_GUARDADO = {
     "title": "✅ Caso registrado",
-    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "description": "¿Qué deseas hacer ahora?",
+    "footer": "Compararemos tus datos con los reportes de desaparecidos.",
+    "button": "Opciones",
+    "sections": [{"title": "Continuar", "rows": [
+        {"title": "Registrar otro caso",                 "rowId": "reporte", "description": None},
+        {"title": "Reportar desaparecido",               "rowId": "1",       "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
+    ]}],
+}
+
+_LIST_NOTAS_ADICIONALES = {
+    "title": "👇 O elige alguna de estas opciones",
+    "description": "Puedes continuar escribiendo detalles arriba.",
     "footer": "",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
-        {"title": "Registrar otro caso",      "rowId": "reporte", "description": None},
-        {"title": "Soy familiar",             "rowId": "1",       "description": None},
-        {"title": "Enviar lista de ingresos", "rowId": "3",       "description": None},
-        {"title": "Menú principal",           "rowId": "inicio",  "description": None},
+        {"title": "Reportar otro desaparecido",          "rowId": "reporte", "description": None},
+        {"title": "Reporte de rescatista",               "rowId": "2",       "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
     ]}],
 }
 
 _LIST_HOSPITAL_NAV_ROWS = [
-    {"title": "Cambiar institución", "rowId": "cambiar", "description": None},
+    {"title": "Cambiar Hospital o Institución", "rowId": "cambiar", "description": None},
     {"title": "Menú principal",      "rowId": "inicio",  "description": None},
 ]
 
 
-def _hospital_nav_list(title: str, description: str) -> dict:
+def _hospital_nav_list() -> dict:
     return {
-        "title": title,
-        "description": description,
+        "title": "👇 ¿Necesitas hacer algo más?",
+        "description": "Utiliza alguna de estas opciones.",
         "footer": "",
         "button": "Opciones",
         "sections": [{"title": "Navegación", "rows": _LIST_HOSPITAL_NAV_ROWS}],
@@ -112,7 +125,8 @@ class Orchestrator:
         self.context_manager = ContextManager()
         self.response_generator = ResponseGenerator()
         self.analytics_logger = AnalyticsLogger(db)
-        self._pending_list: Optional[dict] = None  # payload para sendList; el webhook lo lee tras process_message
+        self._pending_list: Optional[dict] = None       # payload para sendList; el webhook lo lee tras process_message
+        self._pre_list_message: Optional[str] = None  # texto a enviar antes del sendList (solo flujo hospital)
 
     async def process_message(
         self,
@@ -122,7 +136,8 @@ class Orchestrator:
         media_url: Optional[str] = None,
         waha_chat_id: Optional[str] = None,
     ) -> Tuple[str, bool]:
-        self._pending_list = None  # reset por cada mensaje
+        self._pending_list = None      # reset por cada mensaje
+        self._pre_list_message = None  # reset por cada mensaje
         dlog("ORCHESTRATOR", "INICIO",
              operacion_id=operacion_id,
              phone=client_phone,
@@ -198,6 +213,11 @@ class Orchestrator:
         # --- Escape global: "inicio" reinicia desde cualquier nodo ---
         if (message_text or "").strip().lower() == "inicio":
             prev_node = conversation.current_node_key or "?"
+            if prev_node == "notas_adicionales":
+                from app.core.intake import commit_report
+                _report = commit_report(self.db, conversation, client_phone, notes="")
+                if _report:
+                    dlog("ORCHESTRATOR", "Intake: report creado (escape inicio desde notas)", report_id=_report.id)
             context = self.context_manager.get(conversation)
             context.clear()
             conversation.context = json.dumps(context)
@@ -363,6 +383,11 @@ class Orchestrator:
             _report = commit_report(self.db, conversation, client_phone, notes=message_text)
             if _report:
                 dlog("ORCHESTRATOR", "Intake: report creado", report_id=_report.id)
+        elif current_node.node_key == "notas_adicionales":
+            from app.core.intake import commit_report
+            _report = commit_report(self.db, conversation, client_phone, notes="")
+            if _report:
+                dlog("ORCHESTRATOR", "Intake: report creado (ruptura de flujo, sin notas)", report_id=_report.id)
 
         # --- Paso 10: Context Manager ---
         conversation.current_node_key = next_node.node_key
@@ -404,9 +429,12 @@ class Orchestrator:
             "fallback":            _LIST_BIENVENIDA,
             "reporte_guardado":    _LIST_REPORTE_GUARDADO,
             "rescatista_guardado": _LIST_RESCATISTA_GUARDADO,
+            "notas_adicionales":   _LIST_NOTAS_ADICIONALES,
         }
         if next_node.node_key in _list_map:
             self._pending_list = _list_map[next_node.node_key]
+            if next_node.node_key in {"notas_adicionales", "reporte_guardado", "rescatista_guardado"}:
+                self._pre_list_message = response
 
         if next_node.node_key == "escalado_humano":
             conversation.status = "escalated"
@@ -505,6 +533,8 @@ class Orchestrator:
                 "O escribe *reporte* para registrar un nuevo caso."
             )
         conversation.current_node_key = "notas_adicionales"
+        self._pre_list_message = response
+        self._pending_list = _LIST_NOTAS_ADICIONALES
         dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
              fotos=photo_count, motivo=motivo)
         self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
@@ -552,10 +582,8 @@ class Orchestrator:
             "Envía fotos de las listas de ingresos cuando puedas — "
             "cada registro ayuda a conectar familias."
         )
-        self._pending_list = _hospital_nav_list(
-            title=f"Reportando para {nombre}",
-            description="Envía fotos de las listas de ingresos cuando puedas — cada registro ayuda a conectar familias.",
-        )
+        self._pre_list_message = response
+        self._pending_list = _hospital_nav_list()
 
         logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
@@ -595,20 +623,20 @@ class Orchestrator:
             self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
-            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
-            self._pending_list = _hospital_nav_list(
-                title=f"📋 Lista recibida ({lista_count})",
-                description="Puedes seguir enviando más. Muchas gracias. 🙏",
+            response = (
+                f"📋 Lista recibida ({lista_count}). Muchas gracias. 🙏\n\n"
+                "Tus datos serán comparados con los reportes de desaparecidos. "
+                "Puedes seguir enviando más fotos."
             )
+            self._pre_list_message = response
+            self._pending_list = _hospital_nav_list()
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
         logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
-        response = "Para enviar listas adjunta una foto."
-        self._pending_list = _hospital_nav_list(
-            title="Listas de ingresos",
-            description="Para enviar listas adjunta una foto.",
-        )
+        response = "Para enviar listas adjunta una foto. 📸"
+        self._pre_list_message = response
+        self._pending_list = _hospital_nav_list()
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
@@ -749,9 +777,16 @@ class Orchestrator:
         storage_dir = settings.photo_storage_path
         os.makedirs(storage_dir, exist_ok=True)
 
+        # WAHA incluye su propia URL base en media_url usando localhost, que no
+        # resuelve desde el contenedor del bot. Se reemplaza por el hostname interno.
+        waha_base = settings.waha_url  # ej. http://waha:3000
+        internal_url = media_url.replace("http://localhost:3000", waha_base).replace(
+            "https://localhost:3000", waha_base
+        )
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(media_url)
+                resp = await client.get(internal_url)
                 resp.raise_for_status()
 
                 content_type = resp.headers.get("content-type", "image/jpeg")
@@ -769,10 +804,10 @@ class Orchestrator:
                 with open(local_path, "wb") as f:
                     f.write(resp.content)
 
-                logger.debug("Foto descargada: %s → %s", media_url, local_path)
+                logger.debug("Foto descargada: %s → %s", internal_url, local_path)
                 return local_path
         except Exception as e:
-            logger.warning("No se pudo descargar foto %s: %s", media_url, e)
+            logger.warning("No se pudo descargar foto %s: %s", internal_url, e)
             return None
 
     # ------------------------------------------------------------------
