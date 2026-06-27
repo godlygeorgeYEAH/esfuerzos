@@ -2,7 +2,7 @@ version: "3.9"
 services:
   reune-api:
     build: .
-    container_name: reune-api
+    container_name: reune-ve-api
     restart: unless-stopped
     ports:
       - "8080:8080"
