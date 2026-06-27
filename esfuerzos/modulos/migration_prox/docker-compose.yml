@@ -21,6 +21,8 @@ services:
       PHOTO_MAX_COUNT: ${PHOTO_MAX_COUNT:-5}
       PHOTO_TTL_SECONDS: ${PHOTO_TTL_SECONDS:-60}
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
     volumes:
       - reune_data:/data
     depends_on:
