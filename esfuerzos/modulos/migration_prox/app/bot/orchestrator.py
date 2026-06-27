@@ -38,6 +38,7 @@ from app.bot.analytics_logger import AnalyticsLogger
 from app.bot.dev_logger import dlog
 from app.bot.faq_matcher import match_faq
 from app.models.bot import Conversacion, MensajeConversacion
+from app.services.cliente_service import upsert_cliente, set_user_type
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,10 @@ class Orchestrator:
              waha_chat_id=waha_chat_id,
              mensaje=message_text,
              media=bool(media_url))
+
+        # --- Upsert cliente ---
+        _chat_id_key = waha_chat_id or f"{client_phone}@c.us"
+        upsert_cliente(self.db, _chat_id_key, client_phone)
 
         # --- Paso 1: Cliente bloqueado ---
         is_blocked = self.engine._is_client_blocked(operacion_id, client_phone)
@@ -224,6 +229,9 @@ class Orchestrator:
              nodo_destino=target_node_key,
              razon=razon,
              metodo=metodo)
+
+        if current_node.node_key == "bienvenida":
+            set_user_type(self.db, _chat_id_key, target_node_key)
 
         if target_node_key == "fallback":
             dlog("ORCHESTRATOR", "Fallback activado", razon=razon)
