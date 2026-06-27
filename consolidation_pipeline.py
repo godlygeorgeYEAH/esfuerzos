@@ -56,6 +56,14 @@ MATCH_COUNT: int = 10
 # Sources that may contain noise rows (events, not individual persons)
 _NOISE_NAME_PREFIX = "evento:"
 
+# Generic placeholder names that are not real persons — never embed or match
+_GENERIC_NAMES = {
+    "menor reportado", "femenino sin identificar", "masculino sin identificar",
+    "menor sin identificar", "sin identificar", "desconocido", "desconocida",
+    "persona sin identificar", "nn", "n.n.", "n/n", "menor",
+    "paciente sin identificar", "paciente desconocido", "femenino", "masculino",
+}
+
 
 def _sb_headers(key: str, prefer: str = "") -> dict:
     h = {
@@ -124,7 +132,8 @@ async def compute_text_embeddings(
             valid_rows = []
             for row in rows:
                 name = (row.get("full_name") or "").strip()
-                if name.lower().startswith(_NOISE_NAME_PREFIX):
+                name_lower = name.lower()
+                if name_lower.startswith(_NOISE_NAME_PREFIX) or name_lower in _GENERIC_NAMES:
                     skipped_noise += 1
                     continue
                 text = build_text_for_embedding(row)
