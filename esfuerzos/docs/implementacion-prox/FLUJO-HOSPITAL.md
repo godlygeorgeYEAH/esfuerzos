@@ -48,8 +48,21 @@ El flujo no asume que el usuario trabaja en un hospital — cualquier persona co
 
 Ambas claves se limpian cuando el usuario escribe `cambiar`.
 
+## Listas interactivas
+
+Cada respuesta en `hospital_registrado` (imagen, texto, `cambiar`) incluye una lista interactiva con dos opciones fijas:
+
+| Opción | rowId | Efecto |
+|---|---|---|
+| Cambiar institución | `cambiar` | Limpia contexto → `guia_hospital` |
+| Menú principal | `inicio` | Limpia contexto completo → `bienvenida` |
+
+El payload de la lista se genera dinámicamente con `_hospital_nav_list(title, description)` en `orchestrator.py`, usando el nombre de la institución activa como título.
+
+Ver `LISTAS-INTERACTIVAS.md` para el mecanismo de envío y extracción de `rowId`.
+
 ## Notas
 
 - El usuario queda en `hospital_registrado` indefinidamente — loop de recepción de listas sin expiración.
 - `cambiar` permite al mismo usuario reportar múltiples instituciones sin reiniciar la conversación.
-- Un mismo `wa_chat_id` que reporta otra institución con `cambiar` crea un nuevo registro en `hospitales` (upsert por `wa_chat_id` actualiza el existente — un número = una institución activa a la vez).
+- Un mismo `wa_chat_id` que reporta otra institución con `cambiar` actualiza el registro en `hospitales` (upsert por `wa_chat_id` — un número = una institución activa a la vez).
