@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     photo_storage_path: str = "media/photos"  # directorio local de descarga
 
     # ----------------------------------------------------------------
+    # Supabase — almacenamiento de reportes y fotos
+    # ----------------------------------------------------------------
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+
+    # ----------------------------------------------------------------
     # Entorno
     # ----------------------------------------------------------------
     environment: str = "development"

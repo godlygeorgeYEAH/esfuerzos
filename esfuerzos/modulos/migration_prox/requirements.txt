@@ -9,3 +9,4 @@ slowapi>=0.1.9           # rate limiting del webhook
 python-multipart>=0.0.9  # uploads de archivos
 aioboto3>=13.0.0         # solo si STORAGE_BACKEND=s3
 psycopg2-binary>=2.9.0   # driver PostgreSQL
+supabase>=2.10.0         # cliente Supabase para reunion_reports
