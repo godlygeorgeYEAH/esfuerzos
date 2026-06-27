@@ -7,3 +7,4 @@ __pycache__/
 proxy_stats.json
 cookies_*.json
 proxies.txt
+*.db
