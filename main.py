@@ -35,6 +35,12 @@ from slowapi.util import get_remote_address
 from base44_poller import run_polling_loop
 from base44_webhook_router import router as base44_router
 from config import get_settings
+from consolidation_pipeline import (
+    compute_text_embeddings,
+    run_text_cross_match,
+    run_face_cross_match,
+    run_full_consolidation,
+)
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
 from waha_intake import router as waha_router
 
@@ -108,6 +114,16 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scrapers = scrapers
     app.state.scheduler = scheduler
+
+    # Periodic embedding + cross-match for newly scraped records
+    scheduler.add_job(
+        compute_text_embeddings, IntervalTrigger(seconds=1800),
+        args=[app], id="embed_new_reports", max_instances=1,
+    )
+    scheduler.add_job(
+        run_text_cross_match, IntervalTrigger(seconds=3600),
+        args=[app], id="text_cross_match", max_instances=1,
+    )
 
     asyncio.create_task(_startup_sweep(scrapers))
     asyncio.create_task(_register_base44_webhook())
@@ -195,6 +211,42 @@ async def admin_bulk_import(
     else:
         background_tasks.add_task(run_full_import, app)
     return {"ok": True, "message": f"Bulk import started (source={source})"}
+
+
+@app.post("/admin/consolidate")
+async def admin_consolidate(
+    background_tasks: BackgroundTasks,
+    phase: int = 0,
+    x_admin_key: str = Header(default=""),
+):
+    """
+    Trigger the data consolidation pipeline.
+
+    phase=0 (default): run all three phases
+    phase=1: text embedding only
+    phase=2: text cross-match only
+    phase=3: face cross-match only
+
+    Requires X-Admin-Key header when ADMIN_KEY env var is set.
+    Each phase is idempotent and safe to re-run.
+    """
+    if settings.admin_key and not secrets.compare_digest(x_admin_key, settings.admin_key):
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+    if phase == 1:
+        background_tasks.add_task(compute_text_embeddings, app)
+        msg = "Phase 1: text embedding started"
+    elif phase == 2:
+        background_tasks.add_task(run_text_cross_match, app)
+        msg = "Phase 2: text cross-match started"
+    elif phase == 3:
+        background_tasks.add_task(run_face_cross_match, app)
+        msg = "Phase 3: face cross-match started"
+    else:
+        background_tasks.add_task(run_full_consolidation, app)
+        msg = "Full consolidation pipeline started (phases 1-3)"
+
+    return {"ok": True, "message": msg}
 
 
 if __name__ == "__main__":

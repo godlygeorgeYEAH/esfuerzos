@@ -29,6 +29,7 @@ WAHA_WEBHOOK_SECRET to enable X-Waha-Signature validation if needed.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -42,6 +43,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 from config import get_settings
+from consolidation_pipeline import embed_and_match_report
 from face_pipeline import process_photo_for_report
 
 logger = logging.getLogger(__name__)
@@ -265,6 +267,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
         report_id = await _upsert_report(phone, extracted, conv_key)
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
+            asyncio.create_task(embed_and_match_report(report_id, extracted, app))
         else:
             logger.error("Failed to upsert report for phone %s", phone)
 
