@@ -40,6 +40,7 @@ can appear in multiple hospital registries.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -64,15 +65,10 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # External Supabase project for hospitalesenvenezuela.com
-# The anon key is publicly embedded in the site HTML by design (emergency data).
+# The anon key must be provided via HOSPITALES_EXT_KEY environment variable.
+# No default key is hardcoded; the source is disabled if the env var is unset.
 # ---------------------------------------------------------------------------
 _EXT_URL_DEFAULT = "https://ozuxfepfkvnxkywdsqxy.supabase.co"
-_EXT_KEY_DEFAULT = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-    ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im96dXhmZXBma3ZueGt5d2RzcXh5Iiwicm9sZSI6Im"
-    "Fub24iLCJpYXQiOjE3ODI0MjI5NTEsImV4cCI6MjA5Nzk5ODk1MX0"
-    ".YhW0GalGkQZdO2NJTg_01C5XhdMmJ6RbNSNXXC0xG4o"
-)
 
 _SOURCE_NAME = "hospitales_ve"
 _PAGE_SIZE = 100
@@ -84,6 +80,9 @@ _TABLE_CANDIDATES = ["pacientes", "personas", "patients"]
 _AGE_RE = re.compile(r"(\d{1,3})\s*a[nn]o", re.IGNORECASE)
 _AGE_PLAIN_RE = re.compile(r"^(\d{1,3})\s*[|\-]")
 _LOCATION_RE = re.compile(r"[\-|]\s*(.+)$")
+
+# Fields considered death-status indicators in the external DB.
+_DECEASED_VALUES = {"fallecido", "muerto", "deceased"}
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +108,18 @@ def _parse_neighborhood_from_detalle(detalle: str | None) -> str | None:
         return None
     m = _LOCATION_RE.search(detalle)
     return m.group(1).strip() if m else None
+
+
+def _fallback_source_url(raw: dict[str, Any]) -> str:
+    """
+    Derive a stable dedup key when 'id' is missing from the external record.
+    Uses a short SHA-256 digest of (nombre, hospital, ciudad) concatenated.
+    """
+    nombre = str(raw.get("nombre") or raw.get("name") or "")
+    hospital = str(raw.get("hospital") or "")
+    ciudad = str(raw.get("ciudad") or "")
+    digest = hashlib.sha256(f"{nombre}|{hospital}|{ciudad}".encode()).hexdigest()[:16]
+    return f"hospitales_ve:hash:{digest}"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +160,7 @@ class HospitalesVEScraper(BaseVEScraper):
     # -----------------------------------------------------------------------
 
     def _sb_headers(
-        self, prefer: str = "resolution=merge-duplicates,return=minimal"
+        self, prefer: str = "resolution=ignore-duplicates,return=minimal"
     ) -> dict[str, str]:
         """Headers for OUR Supabase (uses instance credentials)."""
         return {
@@ -175,7 +186,7 @@ class HospitalesVEScraper(BaseVEScraper):
     async def upsert_report(self, data: dict[str, Any]) -> None:
         """
         Write a normalized record to OUR 'reports' table.
-        Conflicts on (source, source_url) are merged (update existing row).
+        Conflicts on (source, source_url) are ignored (first-seen wins).
         """
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
@@ -294,8 +305,23 @@ class HospitalesVEScraper(BaseVEScraper):
           last_seen_location = hospital | ubicacion | ciudad
           source            = "hospitales_ve"
           source_url        = "hospitales_ve:{id}"  (conflict key for upsert)
+
+        If the external record has no 'id', a stable hash-based key is derived
+        from (nombre, hospital, ciudad) to avoid source_url collisions.
+
+        If the record's 'estado' field indicates death (fallecido/muerto/deceased),
+        distinguishing_marks is set to 'Fallecido'.
         """
         record_id = raw.get("id", "")
+        if not record_id:
+            source_url = _fallback_source_url(raw)
+            logger.debug(
+                "HospitalesVEScraper.normalize: record missing 'id', using hash key %s",
+                source_url,
+            )
+        else:
+            source_url = f"hospitales_ve:{record_id}"
+
         full_name = (
             raw.get("nombre")
             or raw.get("name")
@@ -307,21 +333,25 @@ class HospitalesVEScraper(BaseVEScraper):
             or raw.get("ubicacion")
             or raw.get("ciudad")
         )
+
+        estado = str(raw.get("estado") or "").lower().strip()
+        distinguishing_marks = "Fallecido" if estado in _DECEASED_VALUES else None
+
         return {
             "kind": "found",
             "full_name": full_name,
             "age": age,
             "last_seen_location": last_seen_location,
-            "distinguishing_marks": None,
+            "distinguishing_marks": distinguishing_marks,
             "clothing": None,
             "source": _SOURCE_NAME,
-            "source_url": f"hospitales_ve:{record_id}",
+            "source_url": source_url,
             "raw_data": strip_pii(raw),
         }
 
     async def search(self, query: str) -> list[dict[str, Any]]:
         """
-        POST /rest/v1/rpc/buscar_paciente with {"nombre": query}.
+        POST /rest/v1/rpc/buscar_paciente with {"p_term": query}.
         Returns raw record dicts from the external Supabase project.
         Returns [] if ext_key is empty or on HTTP/network error.
         """
@@ -337,7 +367,7 @@ class HospitalesVEScraper(BaseVEScraper):
                 resp = await client.post(
                     url,
                     headers=self._ext_headers(),
-                    json={"nombre": query},
+                    json={"p_term": query},
                 )
                 if resp.status_code == 200:
                     records = resp.json()
@@ -373,8 +403,15 @@ class HospitalesVEScraper(BaseVEScraper):
                 name = raw.get("nombre") or raw.get("name")
                 if not name or not str(name).strip():
                     continue
-                await self.upsert_report(self.normalize(raw))
-                rows_upserted += 1
+                try:
+                    await self.upsert_report(self.normalize(raw))
+                    rows_upserted += 1
+                except Exception as rec_exc:
+                    logger.warning(
+                        "HospitalesVEScraper.poll_recent: failed to upsert record %s: %s",
+                        raw.get("id", "<no-id>"),
+                        rec_exc,
+                    )
         except Exception as exc:
             error_msg = str(exc)
             logger.error("HospitalesVEScraper.poll_recent failed: %s", exc)
@@ -401,8 +438,17 @@ class HospitalesVEScraper(BaseVEScraper):
                     name = raw.get("nombre") or raw.get("name")
                     if not name or not str(name).strip():
                         continue
-                    await self.upsert_report(self.normalize(raw))
-                    rows_upserted += 1
+                    try:
+                        await self.upsert_report(self.normalize(raw))
+                        rows_upserted += 1
+                    except Exception as rec_exc:
+                        logger.warning(
+                            "HospitalesVEScraper.full_sweep: failed to upsert record %s "
+                            "on page %d: %s",
+                            raw.get("id", "<no-id>"),
+                            page,
+                            rec_exc,
+                        )
                 logger.debug(
                     "HospitalesVEScraper.full_sweep: page %d, %d records, total=%d",
                     page,
@@ -451,9 +497,10 @@ class HospitalesVESource(BaseSearchSource):
     timeout_seconds = 7.0
 
     def __init__(self) -> None:
-        # Use env var if set; fall back to the public anon key embedded in HTML.
+        # Require HOSPITALES_EXT_KEY env var; no hardcoded default key.
+        # If unset, search_person returns [] immediately (source disabled).
         self._ext_url = os.environ.get("HOSPITALES_EXT_URL", _EXT_URL_DEFAULT)
-        self._ext_key = os.environ.get("HOSPITALES_EXT_KEY", _EXT_KEY_DEFAULT)
+        self._ext_key = os.environ.get("HOSPITALES_EXT_KEY", "")
 
     def _ext_headers(self) -> dict[str, str]:
         return {
@@ -463,6 +510,13 @@ class HospitalesVESource(BaseSearchSource):
         }
 
     async def search_person(self, query: SearchQuery) -> list[SearchResult]:
+        if not self._ext_key:
+            logger.warning(
+                "HospitalesVESource.search_person: HOSPITALES_EXT_KEY is not set; "
+                "source disabled"
+            )
+            return []
+
         results: list[SearchResult] = []
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
@@ -504,7 +558,7 @@ class HospitalesVESource(BaseSearchSource):
                             detail=detalle,
                             contact=rec.get("telefono"),
                             source_url="https://hospitalesenvenezuela.com",
-                            kind="hospital_patient",
+                            kind="found",
                             raw=rec,
                         ))
 
