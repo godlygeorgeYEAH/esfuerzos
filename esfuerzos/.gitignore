@@ -1,4 +1,5 @@
-﻿*.csv
+﻿venv/
+*.csv
 *.json
 __pycache__/
 *.pyc
