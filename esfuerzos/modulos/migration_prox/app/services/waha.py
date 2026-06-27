@@ -33,7 +33,11 @@ async def ensure_default_session(retries: int = 15, delay: float = 2.0) -> bool:
                 if resp.status_code == 200:
                     data = resp.json()
                     existing_webhooks = (data.get("config") or {}).get("webhooks") or []
-                    already_correct = any(w.get("url") == webhook_url for w in existing_webhooks)
+                    expected_events = set(webhook_payload["events"])
+                    already_correct = any(
+                        w.get("url") == webhook_url and set(w.get("events") or []) >= expected_events
+                        for w in existing_webhooks
+                    )
                     if already_correct:
                         logger.info("WAHA session '%s' already configured correctly.", session_name)
                         return True
