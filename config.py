@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     admin_key: str = ""
     # C3: CORS origins (comma-separated, or * for open)
     allowed_origins: str = "*"
+    # LLM (Groq, OpenAI-compatible) — used for WAHA intake bot
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "llama-3.3-70b-versatile"
 
     class Config:
         env_file = ".env"

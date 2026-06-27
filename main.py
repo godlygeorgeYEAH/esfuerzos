@@ -36,6 +36,7 @@ from base44_poller import run_polling_loop
 from base44_webhook_router import router as base44_router
 from config import get_settings
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
+from waha_intake import router as waha_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -146,6 +147,7 @@ for _mount_path, _dir in [
         app.mount(_mount_path, StaticFiles(directory=_dir), name=_mount_path.lstrip("/"))
 
 app.include_router(base44_router)
+app.include_router(waha_router)
 
 
 @app.get("/health")
