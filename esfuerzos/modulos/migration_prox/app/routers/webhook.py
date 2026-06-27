@@ -115,6 +115,15 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     message_text = (payload_data.get("body") or "").strip()
 
+    # Respuesta de lista interactiva — WAHA envía el título de la fila en body
+    # pero el rowId (que el FSM necesita) viene en listResponse.
+    # Reemplazamos message_text con el rowId para que la navegación funcione.
+    _list_resp = payload_data.get("listResponse") or {}
+    _row_id = (_list_resp.get("singleSelectReply") or {}).get("selectedRowId") or _list_resp.get("selectedRowId")
+    if _row_id:
+        logger.info("List response detectado → rowId=%r (body era %r)", _row_id, message_text)
+        message_text = _row_id.strip()
+
     # Extraer media (comprobante de pago u otro archivo adjunto)
     media_url: str | None = None
     if payload_data.get("hasMedia") or payload_data.get("mediaUrl"):
