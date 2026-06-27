@@ -115,6 +115,11 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     # Extraer número de teléfono del cliente (formato: 584121234567@c.us → 584121234567)
     chat_id = payload_data.get("from", "")
+
+    # Ignorar Estados de WhatsApp (Stories) — llegan como status@broadcast o *@broadcast
+    if chat_id == "status@broadcast" or chat_id.endswith("@broadcast"):
+        return {"status": "ignored", "reason": "status_broadcast"}
+
     client_phone = chat_id.split("@")[0] if "@" in chat_id else chat_id
 
     if not client_phone:
