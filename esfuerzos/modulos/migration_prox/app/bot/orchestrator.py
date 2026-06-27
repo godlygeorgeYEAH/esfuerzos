@@ -457,7 +457,7 @@ class Orchestrator:
                 logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
                 response = (
                     f"📸 Imagen recibida ({count}).\n\n"
-                    "Puedes enviar más fotos.\n"
+                    "Puedes enviar más fotos o escribir texto para complementar el reporte.\n"
                     "Escribe *listo* cuando termines."
                 )
             self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
