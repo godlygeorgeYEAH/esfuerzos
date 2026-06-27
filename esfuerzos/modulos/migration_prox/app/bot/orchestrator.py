@@ -135,6 +135,18 @@ class Orchestrator:
             dlog("ORCHESTRATOR", "Conversación escalada — bot silenciado")
             return "", False
 
+        # --- Escape global: "inicio" reinicia desde cualquier nodo ---
+        if (message_text or "").strip().lower() == "inicio":
+            context = self.context_manager.get(conversation)
+            context.clear()
+            conversation.context = json.dumps(context)
+            conversation.current_node_key = "bienvenida"
+            bienvenida_node = self.engine._get_node_by_key(operacion_id, "bienvenida")
+            response = self.engine._generate_response(bienvenida_node, operacion_id, conversation) if bienvenida_node else "Hola, soy Reúne. Escribe 1, 2 o 3 para continuar."
+            logger.info("[BOT] phone=%s → inicio (reinicio desde %s)", conversation.client_phone, conversation.current_node_key or "?")
+            self._save_bot_message(conversation, response, "bienvenida", ai_generated=False, ai_confidence=None)
+            return response, True
+
         # --- Paso 6: Obtener nodo actual ---
         current_node = self.engine._get_current_node(conversation)
 

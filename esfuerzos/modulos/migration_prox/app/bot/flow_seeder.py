@@ -109,7 +109,11 @@ DEFAULT_NODES = [
             "✅ *Reporte registrado.*\n\n"
             "Nuestro equipo lo revisará. No confirmaremos coincidencias "
             "sin verificación humana previa.\n\n"
-            "Escribe *reporte* en cualquier momento para registrar otro caso."
+            "¿Qué deseas hacer ahora?\n"
+            "*1* — Reportar otro familiar\n"
+            "*2* — Soy rescatista\n"
+            "*3* — Enviar lista de ingresos\n\n"
+            "O escribe *inicio* para volver al menú principal."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
@@ -150,11 +154,19 @@ DEFAULT_NODES = [
         "order_position": 7,
         "message_template": (
             "✅ *Caso registrado.*\n\n"
-            "Nuestro equipo lo revisará. Escribe *reporte* para registrar otro caso."
+            "Nuestro equipo lo revisará.\n\n"
+            "¿Qué deseas hacer ahora?\n"
+            "*reporte* — Registrar otro caso\n"
+            "*1* — Soy familiar\n"
+            "*3* — Enviar lista de ingresos\n\n"
+            "O escribe *inicio* para volver al menú principal."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
             "reporte": "guia_rescatista",
+            "1": "guia_familiar",
+            "2": "guia_rescatista",
+            "3": "guia_hospital",
             "default": "guia_rescatista",
         }),
     },
