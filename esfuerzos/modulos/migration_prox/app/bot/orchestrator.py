@@ -749,9 +749,16 @@ class Orchestrator:
         storage_dir = settings.photo_storage_path
         os.makedirs(storage_dir, exist_ok=True)
 
+        # WAHA incluye su propia URL base en media_url usando localhost, que no
+        # resuelve desde el contenedor del bot. Se reemplaza por el hostname interno.
+        waha_base = settings.waha_url  # ej. http://waha:3000
+        internal_url = media_url.replace("http://localhost:3000", waha_base).replace(
+            "https://localhost:3000", waha_base
+        )
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(media_url)
+                resp = await client.get(internal_url)
                 resp.raise_for_status()
 
                 content_type = resp.headers.get("content-type", "image/jpeg")
@@ -769,10 +776,10 @@ class Orchestrator:
                 with open(local_path, "wb") as f:
                     f.write(resp.content)
 
-                logger.debug("Foto descargada: %s → %s", media_url, local_path)
+                logger.debug("Foto descargada: %s → %s", internal_url, local_path)
                 return local_path
         except Exception as e:
-            logger.warning("No se pudo descargar foto %s: %s", media_url, e)
+            logger.warning("No se pudo descargar foto %s: %s", internal_url, e)
             return None
 
     # ------------------------------------------------------------------
