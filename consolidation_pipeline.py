@@ -77,8 +77,8 @@ async def compute_text_embeddings(
     """
     Batch-compute text embeddings for reports missing them.
 
-    Excludes noise rows where full_name starts with 'EVENTO:' (terremotove
-    social posts) since they don't contain real person data.
+    Processes `found` records first (fewer, critical for cross-matching),
+    then `missing`. Excludes noise rows where full_name starts with 'EVENTO:'.
 
     Returns: {"processed": N, "skipped_noise": N, "errors": N}
     """
@@ -89,71 +89,73 @@ async def compute_text_embeddings(
     processed = 0
     skipped_noise = 0
     errors = 0
-    offset = 0
 
-    logger.info("Phase 1: computing text embeddings (batch_size=%d)", batch_size)
+    # Process `found` first (hospital/terremotove records), then `missing`.
+    # `found` side is small (~189 real records) and needed first for matching.
+    for kind_filter in ["found", "missing"]:
+        offset = 0
+        logger.info("Phase 1: processing kind=%s", kind_filter)
 
-    while True:
-        async with httpx.AsyncClient(timeout=20) as cl:
-            r = await cl.get(
-                f"{sb_url}/rest/v1/reports",
-                headers=_sb_headers(sb_key, "count=exact"),
-                params={
-                    "select": "id,full_name,age,last_seen_location,distinguishing_marks,clothing",
-                    "text_embedding": "is.null",
-                    "limit": str(batch_size),
-                    "offset": str(offset),
-                    "order": "created_at.asc",
-                },
-            )
-        if r.status_code not in (200, 206):
-            logger.error("Phase 1: fetch batch failed %d: %s", r.status_code, r.text[:120])
-            break
+        while True:
+            async with httpx.AsyncClient(timeout=20) as cl:
+                r = await cl.get(
+                    f"{sb_url}/rest/v1/reports",
+                    headers=_sb_headers(sb_key, "count=exact"),
+                    params={
+                        "select": "id,full_name,age,last_seen_location,distinguishing_marks,clothing",
+                        "text_embedding": "is.null",
+                        "kind": f"eq.{kind_filter}",
+                        "limit": str(batch_size),
+                        "offset": str(offset),
+                        "order": "created_at.asc",
+                    },
+                )
+            if r.status_code not in (200, 206):
+                logger.error("Phase 1: fetch batch failed %d: %s", r.status_code, r.text[:120])
+                break
 
-        rows = r.json()
-        if not rows:
-            break
+            rows = r.json()
+            if not rows:
+                break
 
-        for row in rows:
-            name = (row.get("full_name") or "").strip()
-            if name.lower().startswith(_NOISE_NAME_PREFIX):
-                skipped_noise += 1
-                continue
+            for row in rows:
+                name = (row.get("full_name") or "").strip()
+                if name.lower().startswith(_NOISE_NAME_PREFIX):
+                    skipped_noise += 1
+                    continue
 
-            text = build_text_for_embedding(row)
-            if not text.strip():
-                skipped_noise += 1
-                continue
+                text = build_text_for_embedding(row)
+                if not text.strip():
+                    skipped_noise += 1
+                    continue
 
-            try:
-                emb = await get_text_embedding(text, text_model)
-                async with httpx.AsyncClient(timeout=15) as cl:
-                    patch = await cl.patch(
-                        f"{sb_url}/rest/v1/reports",
-                        headers=_sb_headers(sb_key, "return=minimal"),
-                        params={"id": f"eq.{row['id']}"},
-                        json={"text_embedding": emb},
-                    )
-                if patch.status_code in (200, 204):
-                    processed += 1
-                else:
-                    logger.warning(
-                        "Phase 1: PATCH failed for %s: %d %s",
-                        row["id"], patch.status_code, patch.text[:80],
-                    )
+                try:
+                    emb = await get_text_embedding(text, text_model)
+                    async with httpx.AsyncClient(timeout=15) as cl:
+                        patch = await cl.patch(
+                            f"{sb_url}/rest/v1/reports",
+                            headers=_sb_headers(sb_key, "return=minimal"),
+                            params={"id": f"eq.{row['id']}"},
+                            json={"text_embedding": emb},
+                        )
+                    if patch.status_code in (200, 204):
+                        processed += 1
+                    else:
+                        logger.warning(
+                            "Phase 1: PATCH failed for %s: %d %s",
+                            row["id"], patch.status_code, patch.text[:80],
+                        )
+                        errors += 1
+                except Exception as exc:
+                    logger.error("Phase 1: embedding error for %s: %s", row["id"], exc)
                     errors += 1
-            except Exception as exc:
-                logger.error("Phase 1: embedding error for %s: %s", row["id"], exc)
-                errors += 1
 
-        logger.info(
-            "Phase 1: offset=%d processed=%d noise=%d errors=%d",
-            offset, processed, skipped_noise, errors,
-        )
-        offset += batch_size
-
-        # Yield to event loop
-        await asyncio.sleep(0)
+            logger.info(
+                "Phase 1 kind=%s: offset=%d processed=%d noise=%d errors=%d",
+                kind_filter, offset, processed, skipped_noise, errors,
+            )
+            offset += batch_size
+            await asyncio.sleep(0)
 
     return {"processed": processed, "skipped_noise": skipped_noise, "errors": errors}
 
