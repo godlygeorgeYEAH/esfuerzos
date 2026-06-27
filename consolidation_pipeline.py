@@ -135,29 +135,37 @@ async def compute_text_embeddings(
 
             if valid_rows:
                 try:
-                    # Batch-encode all texts at once (50x faster than one-by-one)
+                    import numpy as np
+                    # Batch-encode all texts at once — much faster than one-by-one
                     texts = [t for _, t in valid_rows]
-                    embeddings = await asyncio.to_thread(
+                    raw_embeddings = await asyncio.to_thread(
                         text_model.encode, texts, batch_size=len(texts), show_progress_bar=False
                     )
-                    import numpy as np
-                    # Bulk upsert via Supabase merge-duplicates
-                    upsert_rows = []
-                    for (row_id, _), emb in zip(valid_rows, embeddings):
+                    # Normalize and prepare (id, embedding) pairs
+                    pairs = []
+                    for (row_id, _), emb in zip(valid_rows, raw_embeddings):
                         norm = np.linalg.norm(emb)
                         emb_norm = (emb / norm if norm > 0 else emb).tolist()
-                        upsert_rows.append({"id": row_id, "text_embedding": emb_norm})
-                    async with httpx.AsyncClient(timeout=30) as cl:
-                        up = await cl.post(
+                        pairs.append((row_id, emb_norm))
+
+                    # Fire all PATCH calls concurrently (overlap HTTP latency)
+                    async def _patch_one(cl, row_id, emb):
+                        resp = await cl.patch(
                             f"{sb_url}/rest/v1/reports",
-                            headers=_sb_headers(sb_key, "resolution=merge-duplicates,return=minimal"),
-                            json=upsert_rows,
+                            headers=_sb_headers(sb_key, "return=minimal"),
+                            params={"id": f"eq.{row_id}"},
+                            json={"text_embedding": emb},
                         )
-                    if up.status_code in (200, 201, 204):
-                        processed += len(upsert_rows)
-                    else:
-                        logger.warning("Phase 1: bulk upsert failed %d: %s", up.status_code, up.text[:120])
-                        errors += len(upsert_rows)
+                        return resp.status_code in (200, 204)
+
+                    async with httpx.AsyncClient(timeout=30) as cl:
+                        results = await asyncio.gather(
+                            *[_patch_one(cl, rid, emb) for rid, emb in pairs],
+                            return_exceptions=True,
+                        )
+                    ok = sum(1 for r in results if r is True)
+                    processed += ok
+                    errors += len(results) - ok
                 except Exception as exc:
                     logger.error("Phase 1: batch embed error offset=%d: %s", offset, exc)
                     errors += len(valid_rows)
