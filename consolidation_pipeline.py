@@ -102,7 +102,7 @@ async def compute_text_embeddings(
             async with httpx.AsyncClient(timeout=20) as cl:
                 r = await cl.get(
                     f"{sb_url}/rest/v1/reports",
-                    headers=_sb_headers(sb_key, "count=exact"),
+                    headers=_sb_headers(sb_key),
                     params={
                         "select": "id,full_name,age,last_seen_location,distinguishing_marks,clothing",
                         "text_embedding": "is.null",
@@ -120,37 +120,47 @@ async def compute_text_embeddings(
             if not rows:
                 break
 
+            # Filter noise, build text for each real row
+            valid_rows = []
             for row in rows:
                 name = (row.get("full_name") or "").strip()
                 if name.lower().startswith(_NOISE_NAME_PREFIX):
                     skipped_noise += 1
                     continue
-
                 text = build_text_for_embedding(row)
                 if not text.strip():
                     skipped_noise += 1
                     continue
+                valid_rows.append((row["id"], text))
 
+            if valid_rows:
                 try:
-                    emb = await get_text_embedding(text, text_model)
-                    async with httpx.AsyncClient(timeout=15) as cl:
-                        patch = await cl.patch(
+                    # Batch-encode all texts at once (50x faster than one-by-one)
+                    texts = [t for _, t in valid_rows]
+                    embeddings = await asyncio.to_thread(
+                        text_model.encode, texts, batch_size=len(texts), show_progress_bar=False
+                    )
+                    import numpy as np
+                    # Bulk upsert via Supabase merge-duplicates
+                    upsert_rows = []
+                    for (row_id, _), emb in zip(valid_rows, embeddings):
+                        norm = np.linalg.norm(emb)
+                        emb_norm = (emb / norm if norm > 0 else emb).tolist()
+                        upsert_rows.append({"id": row_id, "text_embedding": emb_norm})
+                    async with httpx.AsyncClient(timeout=30) as cl:
+                        up = await cl.post(
                             f"{sb_url}/rest/v1/reports",
-                            headers=_sb_headers(sb_key, "return=minimal"),
-                            params={"id": f"eq.{row['id']}"},
-                            json={"text_embedding": emb},
+                            headers=_sb_headers(sb_key, "resolution=merge-duplicates,return=minimal"),
+                            json=upsert_rows,
                         )
-                    if patch.status_code in (200, 204):
-                        processed += 1
+                    if up.status_code in (200, 201, 204):
+                        processed += len(upsert_rows)
                     else:
-                        logger.warning(
-                            "Phase 1: PATCH failed for %s: %d %s",
-                            row["id"], patch.status_code, patch.text[:80],
-                        )
-                        errors += 1
+                        logger.warning("Phase 1: bulk upsert failed %d: %s", up.status_code, up.text[:120])
+                        errors += len(upsert_rows)
                 except Exception as exc:
-                    logger.error("Phase 1: embedding error for %s: %s", row["id"], exc)
-                    errors += 1
+                    logger.error("Phase 1: batch embed error offset=%d: %s", offset, exc)
+                    errors += len(valid_rows)
 
             logger.info(
                 "Phase 1 kind=%s: offset=%d processed=%d noise=%d errors=%d",
