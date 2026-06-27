@@ -40,7 +40,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
       WAHA_API_KEY: ${WAHA_API_KEY:-}
     volumes:
       - waha_sessions:/app/.wwebjs_auth
