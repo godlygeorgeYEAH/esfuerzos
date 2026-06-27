@@ -120,6 +120,15 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     if payload_data.get("hasMedia") or payload_data.get("mediaUrl"):
         media_url = payload_data.get("mediaUrl") or payload_data.get("media", {}).get("url")
 
+    # Ubicación GPS — convertir a texto para que el pipeline la procese normalmente
+    if not message_text and payload_data.get("location"):
+        loc = payload_data["location"]
+        lat = loc.get("latitude", "")
+        lng = loc.get("longitude", "")
+        desc = (loc.get("description") or loc.get("name") or "").strip()
+        message_text = f"{desc} (GPS: {lat}, {lng})" if desc else f"GPS: {lat}, {lng}"
+        logger.info("Ubicación GPS recibida → '%s'", message_text)
+
     # Ignorar si no hay texto ni media
     if not message_text and not media_url:
         logger.info("DESCARTADO | reason=empty_body | from=%s", payload_data.get("from", "?"))

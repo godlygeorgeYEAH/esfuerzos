@@ -160,28 +160,46 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 8. Guía hospital — placeholder
+    # 8. Guía hospital — solicita nombre y ubicación
     # ------------------------------------------------------------------
     {
         "node_key": "guia_hospital",
-        "node_type": "placeholder",
+        "node_type": "hospital_location",
         "order_position": 8,
         "message_template": (
-            "Gracias por contactarnos 🏥\n\n"
-            "El flujo para hospitales y refugios estará disponible muy pronto.\n"
-            "Un coordinador se pondrá en contacto contigo."
+            "Bienvenidos 🏥\n\n"
+            "Para registrar su hospital o refugio, envíennos su nombre y ubicación.\n\n"
+            "Pueden escribirlo o compartir su ubicación por WhatsApp."
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 9. Fallback — no entendió; retoma con 1/2/3
+    # 9. Hospital registrado — recibe fotos de listas de ingresos
+    # ------------------------------------------------------------------
+    {
+        "node_key": "hospital_registrado",
+        "node_type": "hospital_registered",
+        "order_position": 9,
+        "message_template": (
+            "✅ *Registro completado.*\n\n"
+            "Muchas gracias por sumarse. Para no interrumpir su flujo de trabajo, "
+            "lo único que les pedimos es que nos envíen fotos de sus listas de ingresos "
+            "cuando puedan.\n\n"
+            "Nuestro equipo las procesará internamente. Su aporte es invaluable. 🙏"
+        ),
+        "expected_responses": None,
+        "next_node_map": None,
+    },
+
+    # ------------------------------------------------------------------
+    # 10. Fallback — no entendió; retoma con 1/2/3
     # ------------------------------------------------------------------
     {
         "node_key": "fallback",
         "node_type": "fallback",
-        "order_position": 9,
+        "order_position": 10,
         "message_template": (
             "No entendí tu mensaje.\n\n"
             "Escribe el número de tu perfil:\n"
