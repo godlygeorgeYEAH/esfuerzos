@@ -87,18 +87,6 @@ _LIST_RESCATISTA_GUARDADO = {
     ]}],
 }
 
-_LIST_NOTAS_ADICIONALES = {
-    "title": "👇 O elige alguna de estas opciones",
-    "description": "Puedes continuar escribiendo detalles arriba.",
-    "footer": "",
-    "button": "Opciones",
-    "sections": [{"title": "Continuar", "rows": [
-        {"title": "Reportar otro desaparecido",          "rowId": "reporte", "description": None},
-        {"title": "Reporte de rescatista",               "rowId": "2",       "description": None},
-        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
-        {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
-    ]}],
-}
 
 _LIST_HOSPITAL_NAV_ROWS = [
     {"title": "Cambiar Hospital o Institución", "rowId": "cambiar", "description": None},
@@ -430,11 +418,10 @@ class Orchestrator:
             "fallback":            _LIST_BIENVENIDA,
             "reporte_guardado":    _LIST_REPORTE_GUARDADO,
             "rescatista_guardado": _LIST_RESCATISTA_GUARDADO,
-            "notas_adicionales":   _LIST_NOTAS_ADICIONALES,
         }
         if next_node.node_key in _list_map:
             self._pending_list = _list_map[next_node.node_key]
-            if next_node.node_key in {"notas_adicionales", "reporte_guardado", "rescatista_guardado"}:
+            if next_node.node_key in {"reporte_guardado", "rescatista_guardado"}:
                 self._pre_list_message = response
 
         if next_node.node_key == "escalado_humano":
@@ -530,12 +517,9 @@ class Orchestrator:
         else:
             response = (
                 "📸 Imágenes recibidas.\n\n"
-                "¿Tienes señas, ropa u otros detalles? Escríbelos ahora.\n\n"
-                "O escribe *reporte* para registrar un nuevo caso."
+                "¿Tienes señas, ropa u otros detalles del reportado? Escríbelos ahora."
             )
         conversation.current_node_key = "notas_adicionales"
-        self._pre_list_message = response
-        self._pending_list = _LIST_NOTAS_ADICIONALES
         dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
              fotos=photo_count, motivo=motivo)
         self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
