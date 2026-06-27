@@ -160,17 +160,17 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 8. Guía hospital — solicita nombre y ubicación
+    # 8. Guía hospital — solicita nombre de la institución
     # ------------------------------------------------------------------
     {
         "node_key": "guia_hospital",
         "node_type": "hospital_location",
         "order_position": 8,
         "message_template": (
-            "Bienvenidos 🏥\n\n\n"
-            "Para registrar su hospital o refugio necesitamos tu ubicación. "
-            "Puedes escribirla o compartir tu ubicación en GPS.\n\n\n"
-            "Mándame un texto con tu dirección o comparte tu posición de GPS."
+            "Gracias por contribuir 🙏\n\n"
+            "Los registros de ingresos son una herramienta invaluable para conectar "
+            "a las familias con sus seres queridos.\n\n"
+            "¿Cómo se llama el hospital, refugio o institución que vas a reportar?"
         ),
         "expected_responses": None,
         "next_node_map": None,
@@ -184,11 +184,9 @@ DEFAULT_NODES = [
         "node_type": "hospital_registered",
         "order_position": 9,
         "message_template": (
-            "✅ *Registro completado.*\n\n"
-            "Muchas gracias por sumarse. Para no interrumpir su flujo de trabajo, "
-            "lo único que les pedimos es que nos envíen fotos de sus listas de ingresos "
-            "— los registros de personas admitidas en su institución — cuando puedan.\n\n"
-            "Nuestro equipo las procesará internamente. Su aporte es invaluable. 🙏"
+            "Cuando puedas, envía fotos de las listas de ingresos — "
+            "cualquier registro de personas admitidas ayuda enormemente.\n\n"
+            "Escribe *cambiar* si necesitas reportar otra institución."
         ),
         "expected_responses": None,
         "next_node_map": None,

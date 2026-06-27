@@ -440,7 +440,7 @@ class Orchestrator:
         from app.services.hospital_service import upsert_hospital
 
         if not message_text:
-            response = "Por favor envíen el nombre y ubicación de su hospital o refugio, o compartan su ubicación por WhatsApp."
+            response = "Por favor escribe el nombre del hospital, refugio o institución que vas a reportar."
             self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
             return response, True
 
@@ -449,16 +449,25 @@ class Orchestrator:
         if gps_match:
             lat = float(gps_match.group(1))
             lng = float(gps_match.group(2))
-            nombre = message_text.split(" (GPS:")[0].strip() or None
+            nombre = message_text.split(" (GPS:")[0].strip() or message_text.strip()
         else:
             nombre = message_text.strip()
 
         wa_chat_id = conversation.waha_chat_id or conversation.client_phone
         upsert_hospital(wa_chat_id, nombre, message_text, lat, lng)
 
+        context = self.context_manager.get(conversation)
+        context["hospital_nombre"] = nombre
+        context.pop("hospital_lista_count", None)
+        conversation.context = json.dumps(context)
+
         conversation.current_node_key = "hospital_registrado"
-        registrado_node = self.engine._get_node_by_key(operacion_id, "hospital_registrado")
-        response = self.engine._generate_response(registrado_node, operacion_id, conversation) if registrado_node else "✅ Registro completado. Esperamos sus listas de ingresos. 🙏"
+        response = (
+            f"✅ Reportando para *{nombre}*.\n\n"
+            "Envía fotos de las listas de ingresos cuando puedas — "
+            "cada registro ayuda a conectar familias.\n\n"
+            "Escribe *cambiar* si necesitas reportar otra institución."
+        )
 
         logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
@@ -473,6 +482,19 @@ class Orchestrator:
     ) -> Tuple[str, bool]:
         from app.services.hospital_service import add_lista
 
+        # Cambiar de institución
+        if (message_text or "").strip().lower() == "cambiar":
+            context = self.context_manager.get(conversation)
+            context.pop("hospital_nombre", None)
+            context.pop("hospital_lista_count", None)
+            conversation.context = json.dumps(context)
+            conversation.current_node_key = "guia_hospital"
+            guia_node = self.engine._get_node_by_key(operacion_id, "guia_hospital")
+            response = self.engine._generate_response(guia_node, operacion_id, conversation) if guia_node else "¿Cómo se llama el hospital o institución que vas a reportar?"
+            logger.info("[BOT] phone=%s hospital_registrado → cambiar → guia_hospital", conversation.client_phone)
+            self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
+            return response, True
+
         if media_url:
             wa_chat_id = conversation.waha_chat_id or conversation.client_phone
             local_path = await self._download_photo(media_url, conversation.id, 0)
@@ -485,12 +507,12 @@ class Orchestrator:
             self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
-            response = f"📋 Lista recibida ({lista_count}). Puede continuar enviando más. Muchas gracias. 🙏"
+            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
         logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
-        response = "Recibido. Cuando tengan listas de ingresos, envíen las fotos y las procesaremos. 🙏"
+        response = "Para enviar listas adjunta una foto. Escribe *cambiar* si necesitas reportar otra institución. 🙏"
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
