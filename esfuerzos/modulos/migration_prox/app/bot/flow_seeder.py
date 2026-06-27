@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NODES = [
     # ------------------------------------------------------------------
-    # 1. Bienvenida — identifica el tipo de usuario
+    # 1. Bienvenida — selección del tipo de reporte
     # ------------------------------------------------------------------
     {
         "node_key": "bienvenida",
@@ -29,11 +29,11 @@ DEFAULT_NODES = [
         "order_position": 1,
         "message_template": (
             "Hola, soy *Reúne* 🤝\n\n"
-            "Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n"
-            "¿Cuál es tu perfil?\n\n"
-            "*1* — Soy familiar de un desaparecido\n"
-            "*2* — Soy rescatista\n"
-            "*3* — Soy hospital o refugio"
+            "Estoy aquí para ayudar a conectar personas tras el sismo.\n\n"
+            "¿Qué deseas reportar?\n\n"
+            "*1* — Reporte de desaparecido\n"
+            "*2* — Reporte de rescatista\n"
+            "*3* — Hospital o refugio"
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
@@ -44,7 +44,7 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 2. Guía familiar — instrucciones + pide datos en un solo mensaje
+    # 2. Guía reporte de desaparecido — instrucciones iniciales
     # ------------------------------------------------------------------
     {
         "node_key": "guia_familiar",
@@ -53,9 +53,9 @@ DEFAULT_NODES = [
         "message_template": (
             "Vamos a registrar el reporte en 3 pasos.\n\n"
             "Para el primer paso, envíame *un solo mensaje* con esta información:\n\n"
-            "› El nombre completo de a quien estás reportando\n\n"
-            "› El género de la persona que estás reportando\n\n"
-            "› La edad de la persona que estás reportando\n\n"
+            "› Nombre completo de la persona desaparecida\n\n"
+            "› Género\n\n"
+            "› Edad\n\n"
             "› Última ubicación conocida\n\n"
             "_Ejemplo: María García, femenino, 34, Cumaná centro_"
         ),
@@ -72,7 +72,7 @@ DEFAULT_NODES = [
         "order_position": 3,
         "message_template": (
             "✅ Datos recibidos.\n\n"
-            "Ahora envía *una o varias fotos* de la persona.\n"
+            "Ahora envía *una o varias fotos* de la persona desaparecida.\n"
             "Cuando termines, escribe *listo*."
         ),
         "expected_responses": None,
@@ -80,7 +80,7 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 4. Notas adicionales — señas, ropa; "reporte" inicia uno nuevo
+    # 4. Notas adicionales — señas, ropa; lista para continuar
     # ------------------------------------------------------------------
     {
         "node_key": "notas_adicionales",
@@ -111,8 +111,8 @@ DEFAULT_NODES = [
             "Nuestro equipo lo revisará. No confirmaremos coincidencias "
             "sin verificación humana previa.\n\n"
             "¿Qué deseas hacer ahora?\n"
-            "*1* — Reportar otro familiar\n"
-            "*2* — Soy rescatista\n"
+            "*1* — Reportar otro desaparecido\n"
+            "*2* — Reporte de rescatista\n"
             "*3* — Ingresos de Pacientes Hospitalarios\n\n"
             "O escribe *inicio* para volver al menú principal."
         ),
@@ -127,19 +127,19 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 6. Guía rescatista — intake permisivo: imagen y/o texto, TTL 60 s
+    # 6. Guía reporte de rescatista — intake permisivo: imagen y/o texto
     # ------------------------------------------------------------------
     {
         "node_key": "guia_rescatista",
         "node_type": "rescatista_intake",
         "order_position": 6,
         "message_template": (
-            "Gracias por comunicarte, rescatista. 🙏\n\n"
-            "Lo que más ayuda a la familia:\n\n"
-            "📸 Una foto si puedes\n"
-            "📍 Dónde está exactamente (refugio, hospital, dirección)\n"
-            "❤️ Cómo está (consciente, herida, estable)\n"
-            "🪪 Su nombre, si puede decírtelo\n\n"
+            "Gracias por tu reporte. 🙏\n\n"
+            "La información que más ayuda a identificar a la persona:\n\n"
+            "📸 Una foto si es posible\n"
+            "📍 Dónde se encuentra exactamente (refugio, hospital, dirección)\n"
+            "❤️ Estado de la persona (consciente, herida, estable)\n"
+            "🪪 Nombre, si puede decirlo\n\n"
             "Envía la información en el orden que puedas, nosotros la organizamos."
         ),
         "expected_responses": None,
@@ -158,7 +158,7 @@ DEFAULT_NODES = [
             "Nuestro equipo lo revisará.\n\n"
             "¿Qué deseas hacer ahora?\n"
             "*reporte* — Registrar otro caso\n"
-            "*1* — Soy familiar\n"
+            "*1* — Reportar desaparecido\n"
             "*3* — Ingresos de Pacientes Hospitalarios\n\n"
             "O escribe *inicio* para volver al menú principal."
         ),
@@ -180,9 +180,9 @@ DEFAULT_NODES = [
         "node_type": "hospital_location",
         "order_position": 8,
         "message_template": (
-            "Gracias por contribuir 🙏\n\n"
-            "Los registros de ingresos son una herramienta invaluable para conectar "
-            "a las familias con sus seres queridos.\n\n"
+            "Gracias por contribuir. 🙏\n\n"
+            "Los registros de ingresos son una herramienta invaluable para "
+            "conectar personas con sus seres queridos.\n\n"
             "¿Cómo se llama el hospital, refugio o institución que vas a reportar?"
         ),
         "expected_responses": None,
@@ -214,9 +214,9 @@ DEFAULT_NODES = [
         "order_position": 10,
         "message_template": (
             "No entendí tu mensaje.\n\n"
-            "Escribe el número de tu perfil:\n"
-            "*1* — Familiar de un desaparecido\n"
-            "*2* — Rescatista\n"
+            "Selecciona el tipo de reporte:\n"
+            "*1* — Reporte de desaparecido\n"
+            "*2* — Reporte de rescatista\n"
             "*3* — Hospital o refugio"
         ),
         "expected_responses": None,
@@ -239,7 +239,7 @@ def seed_default_flow(db: Session) -> FlowTemplate:
     if not template:
         template = FlowTemplate(
             name="Flujo de Intake de Crisis — Reúne v1",
-            description="Identifica al usuario y recopila datos del desaparecido o encontrado.",
+            description="Registra reportes de desaparecidos, rescatistas e ingresos hospitalarios.",
             is_system_default=True,
         )
         db.add(template)

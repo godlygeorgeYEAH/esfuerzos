@@ -51,13 +51,13 @@ ENTRY_NODE = "bienvenida"
 
 _LIST_BIENVENIDA = {
     "title": "Reúne",
-    "description": "Hola 🤝 Estoy aquí para ayudarte a conectar personas tras el sismo.\n\n¿Cuál es tu perfil?",
+    "description": "Hola 🤝 Estoy aquí para ayudar a conectar personas tras el sismo.\n\n¿Qué deseas reportar?",
     "footer": "",
     "button": "Seleccionar",
-    "sections": [{"title": "Soy...", "rows": [
-        {"title": "Familiar de un desaparecido", "rowId": "1", "description": None},
-        {"title": "Rescatista",                  "rowId": "2", "description": None},
-        {"title": "Hospital o refugio",           "rowId": "3", "description": None},
+    "sections": [{"title": "Tipo de reporte", "rows": [
+        {"title": "Reporte de desaparecido", "rowId": "1", "description": None},
+        {"title": "Reporte de rescatista",   "rowId": "2", "description": None},
+        {"title": "Hospital o refugio",      "rowId": "3", "description": None},
     ]}],
 }
 
@@ -67,10 +67,10 @@ _LIST_REPORTE_GUARDADO = {
     "footer": "No confirmamos coincidencias sin verificación humana previa.",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
-        {"title": "Reportar otro familiar",   "rowId": "1",      "description": None},
-        {"title": "Soy rescatista",           "rowId": "2",      "description": None},
+        {"title": "Reportar otro desaparecido",          "rowId": "1",      "description": None},
+        {"title": "Reporte de rescatista",               "rowId": "2",      "description": None},
         {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",      "description": None},
-        {"title": "Menú principal",           "rowId": "inicio", "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio", "description": None},
     ]}],
 }
 
@@ -80,10 +80,10 @@ _LIST_RESCATISTA_GUARDADO = {
     "footer": "",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
-        {"title": "Registrar otro caso",      "rowId": "reporte", "description": None},
-        {"title": "Soy familiar",             "rowId": "1",       "description": None},
+        {"title": "Registrar otro caso",                 "rowId": "reporte", "description": None},
+        {"title": "Reportar desaparecido",               "rowId": "1",       "description": None},
         {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
-        {"title": "Menú principal",           "rowId": "inicio",  "description": None},
+        {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
     ]}],
 }
 
@@ -93,8 +93,8 @@ _LIST_NOTAS_ADICIONALES = {
     "footer": "",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
-        {"title": "Reportar otra persona",               "rowId": "reporte", "description": None},
-        {"title": "Soy rescatista",                      "rowId": "2",       "description": None},
+        {"title": "Reportar otro desaparecido",          "rowId": "reporte", "description": None},
+        {"title": "Reporte de rescatista",               "rowId": "2",       "description": None},
         {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
         {"title": "Menú principal",                      "rowId": "inicio",  "description": None},
     ]}],
