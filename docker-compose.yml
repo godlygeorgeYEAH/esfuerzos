@@ -1,0 +1,24 @@
+version: "3.9"
+services:
+  reune-api:
+    build: .
+    container_name: reune-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    mem_limit: 2g
+    env_file:
+      - .env
+    volumes:
+      - insightface_cache:/root/.insightface
+      - huggingface_cache:/root/.cache/huggingface
+      - /root/sos_images:/root/sos_images:ro
+      - /root/crisis_images:/root/crisis_images:ro
+      - /root/reconexion_images:/root/reconexion_images:ro
+      - /root/venezreporta_images:/root/venezreporta_images:ro
+      - app_data:/app/data
+
+volumes:
+  insightface_cache:
+  huggingface_cache:
+  app_data:
