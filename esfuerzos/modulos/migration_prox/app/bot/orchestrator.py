@@ -1,0 +1,742 @@
+"""
+Orchestrator — Coordinador principal del pipeline de mensajería.
+
+Pipeline:
+  1.  Cliente bloqueado        → FlowEngine
+  2.  Bot activo               → FlowEngine
+  3.  Horario de trabajo       → FlowEngine
+  4.  Obtener/crear conversación
+  5.  Guardar mensaje cliente
+  6.  Obtener nodo actual
+      6b. FAQ Match — cortocircuito sin LLM
+  7.  Intent Detection + Similarity en paralelo
+  8.  Decision Engine
+  9.  Nodo destino
+  10. Context Manager
+  11. Response Generator
+  12. Analytics Logger
+  13. Guardar mensaje del bot
+
+Dev mode: DEV_FLOW_LOG=True en .env para logs verbose.
+"""
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Optional, Tuple
+
+from sqlalchemy.orm import Session
+
+from app.bot.flow_engine import FlowEngine
+from app.bot.intent_detector import IntentDetector, IntentResult
+from app.bot.decision_engine import DecisionEngine, SimilarityResult
+from app.bot.context_manager import ContextManager
+from app.bot.response_generator import ResponseGenerator
+from app.bot.analytics_logger import AnalyticsLogger
+from app.bot.dev_logger import dlog
+from app.bot.faq_matcher import match_faq
+from app.models.bot import Conversacion, MensajeConversacion
+from app.services.cliente_service import upsert_cliente, set_user_type
+
+logger = logging.getLogger(__name__)
+
+ENTRY_NODE = "bienvenida"
+
+
+class Orchestrator:
+    def __init__(self, db: Session):
+        self.db = db
+        self.engine = FlowEngine(db)
+        self.intent_detector = IntentDetector()
+        self.decision_engine = DecisionEngine()
+        self.context_manager = ContextManager()
+        self.response_generator = ResponseGenerator()
+        self.analytics_logger = AnalyticsLogger(db)
+
+    async def process_message(
+        self,
+        operacion_id: int,
+        client_phone: str,
+        message_text: str,
+        media_url: Optional[str] = None,
+        waha_chat_id: Optional[str] = None,
+    ) -> Tuple[str, bool]:
+        dlog("ORCHESTRATOR", "INICIO",
+             operacion_id=operacion_id,
+             phone=client_phone,
+             waha_chat_id=waha_chat_id,
+             mensaje=message_text,
+             media=bool(media_url))
+
+        # --- Upsert cliente ---
+        _chat_id_key = waha_chat_id or f"{client_phone}@c.us"
+        upsert_cliente(self.db, _chat_id_key, client_phone)
+
+        # --- Paso 1: Cliente bloqueado ---
+        is_blocked = self.engine._is_client_blocked(operacion_id, client_phone)
+        dlog("ORCHESTRATOR", "Paso 1: Cliente bloqueado",
+             bloqueado=is_blocked,
+             resultado="IGNORADO" if is_blocked else "OK -> continuar")
+        if is_blocked:
+            return "", False
+
+        # --- Paso 2: Bot activo ---
+        bot_config = self.engine._get_bot_config(operacion_id)
+        bot_activo = bool(bot_config and bot_config.is_bot_active)
+        dlog("ORCHESTRATOR", "Paso 2: Bot activo",
+             is_bot_active=bot_activo,
+             resultado="ACTIVO -> continuar" if bot_activo else "INACTIVO -> ignorado")
+        if not bot_activo:
+            return "", False
+
+        # --- Paso 3: Horario de trabajo ---
+        dentro_horario = self.engine._is_within_working_hours(bot_config)
+        dlog("ORCHESTRATOR", "Paso 3: Horario de trabajo",
+             dentro_horario=dentro_horario,
+             resultado="DENTRO -> continuar" if dentro_horario else "FUERA -> away_message")
+        if not dentro_horario:
+            away_message = (
+                bot_config.away_message
+                or "Gracias por tu mensaje. En este momento no estamos disponibles. Te respondemos pronto."
+            )
+            self.engine._save_message(
+                operacion_id, client_phone, "client", message_text, save_conversation=False
+            )
+            return away_message, True
+
+        # --- Paso 4: Obtener o crear conversación ---
+        conversation = self.engine._get_or_create_conversation(
+            operacion_id, client_phone, waha_chat_id=waha_chat_id
+        )
+        dlog("ORCHESTRATOR", "Paso 4: Conversación",
+             conversation_id=conversation.id,
+             nodo_actual=conversation.current_node_key or "None (nueva)")
+
+        # --- Paso 5: Guardar mensaje del cliente ---
+        self.engine._save_message(
+            operacion_id, client_phone, "client", message_text,
+            conversacion_id=conversation.id,
+        )
+        logger.info(
+            "[MSG] phone=%s nodo_actual=%-20s msg=%s%s",
+            client_phone,
+            conversation.current_node_key or "—",
+            (message_text or "")[:80],
+            f" [media]" if media_url else "",
+        )
+        dlog("ORCHESTRATOR", "Paso 5: Mensaje cliente guardado",
+             sender="client",
+             texto=message_text,
+             media_url=media_url or "—")
+
+        if conversation.status == "escalated":
+            dlog("ORCHESTRATOR", "Conversación escalada — bot silenciado")
+            return "", False
+
+        # --- Paso 6: Obtener nodo actual ---
+        current_node = self.engine._get_current_node(conversation)
+
+        if not current_node:
+            current_node = self.engine._get_node_by_key(operacion_id, ENTRY_NODE)
+            if current_node:
+                conversation.current_node_key = ENTRY_NODE
+                dlog("ORCHESTRATOR", "Paso 6: Primera interacción", nodo_inicial=ENTRY_NODE)
+
+        if not current_node:
+            dlog("ORCHESTRATOR", "Paso 6: ERROR - Flujo no configurado")
+            response = "Lo siento, estamos experimentando problemas técnicos. Por favor intenta más tarde."
+            self._save_bot_message(conversation, response, None, ai_generated=False, ai_confidence=None)
+            return response, True
+
+        dlog("ORCHESTRATOR", "Paso 6: Nodo actual",
+             node_key=current_node.node_key,
+             expected_responses=current_node.expected_responses or "ninguna")
+
+        # --- Paso 6c: Nodo guia_hospital — registra ubicación y avanza ---
+        if current_node and current_node.node_key == "guia_hospital":
+            return await self._handle_hospital_location(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo hospital_registrado — recibe fotos de listas ---
+        if current_node and current_node.node_key == "hospital_registrado":
+            return await self._handle_hospital_lista(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6e: Nodo guia_rescatista — imagen y/o texto, TTL 60 s ---
+        if current_node and current_node.node_key == "guia_rescatista":
+            return await self._handle_rescatista_intake(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo pedir_foto — TTL + descarga de fotos ---
+        if current_node and current_node.node_key == "pedir_foto":
+            return await self._handle_pedir_foto(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        if not message_text:
+            dlog("ORCHESTRATOR", "Sin texto — ignorado")
+            return "", False
+
+        # --- Paso 6b: FAQ Match — cortocircuito sin LLM ---
+        faq_respuesta = match_faq(self.db, operacion_id, message_text)
+        if faq_respuesta:
+            dlog("ORCHESTRATOR", "Paso 6b: FAQ match — cortocircuito",
+                 respuesta=faq_respuesta[:60])
+            self._save_bot_message(conversation, faq_respuesta, None, ai_generated=False, ai_confidence=None)
+            return faq_respuesta, True
+        dlog("ORCHESTRATOR", "Paso 6b: FAQ — sin match, continúa pipeline")
+
+        # --- Paso 7: Intent Detection + Similarity Matching en paralelo ---
+        context = self.context_manager.get(conversation)
+        dlog("ORCHESTRATOR", "Paso 7: Lanzando análisis en paralelo",
+             contexto_keys=list(context.keys()) if context else "vacío",
+             modo="Intent Detector (DeepSeek) || Similarity Matcher")
+
+        intent_start = time.monotonic()
+
+        intent_enabled = bool(bot_config and getattr(bot_config, 'enable_intent_detection', False))
+        try:
+            _expected = json.loads(current_node.expected_responses) if current_node.expected_responses else None
+        except Exception:
+            _expected = None
+
+        intent_coro = self.intent_detector.detectar_intencion(
+            mensaje=message_text,
+            contexto=context,
+            current_node=current_node.node_key,
+            expected_responses=_expected,
+            enabled=intent_enabled,
+        )
+        similarity_coro = self._run_similarity_matching(current_node, message_text, conversation)
+
+        results = await asyncio.gather(intent_coro, similarity_coro, return_exceptions=True)
+        intent_latency_ms = int((time.monotonic() - intent_start) * 1000)
+
+        intent_result: IntentResult = (
+            results[0] if not isinstance(results[0], Exception) else IntentResult()
+        )
+        similarity_result: SimilarityResult = (
+            results[1] if not isinstance(results[1], Exception) else SimilarityResult()
+        )
+
+        if isinstance(results[0], Exception):
+            logger.error("Orchestrator: intent detection falló: %s", results[0])
+        if isinstance(results[1], Exception):
+            logger.error("Orchestrator: similarity matching falló: %s", results[1])
+
+        dlog("ORCHESTRATOR", "Paso 7: Resultados del análisis",
+             intent=f"{intent_result.intencion_principal} (conf={intent_result.confidence:.2f})",
+             similarity=f"{similarity_result.match} (conf={similarity_result.confidence:.2f})",
+             entidades=intent_result.entidades,
+             latency_ms=intent_latency_ms)
+
+        # --- Paso 8: Decision Engine ---
+        target_node_key, razon, metodo = self.decision_engine.decidir_navegacion(
+            intent=intent_result,
+            similarity=similarity_result,
+            current_node=current_node.node_key,
+            contexto=context,
+        )
+        dlog("ORCHESTRATOR", "Paso 8: Decision Engine",
+             nodo_origen=current_node.node_key,
+             nodo_destino=target_node_key,
+             razon=razon,
+             metodo=metodo)
+
+        if current_node.node_key == "bienvenida":
+            set_user_type(self.db, _chat_id_key, target_node_key)
+
+        if target_node_key == "fallback":
+            dlog("ORCHESTRATOR", "Fallback activado", razon=razon)
+            response = self.engine._handle_fallback(conversation, message_text)
+            self.context_manager.update(conversation, intent_result, message_text)
+            self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
+            self.analytics_logger.log_decision(
+                conversation.id, operacion_id,
+                current_node.node_key, "fallback",
+                razon, metodo,
+                intent_result.confidence, similarity_result.confidence,
+            )
+            self._save_bot_message(conversation, response, "fallback", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # --- Paso 9: Obtener nodo destino ---
+        next_node = self.engine._get_node_by_key(operacion_id, target_node_key)
+        if not next_node:
+            logger.warning("Orchestrator: nodo '%s' no encontrado, usando fallback", target_node_key)
+            response = self.engine._handle_fallback(conversation, message_text)
+            self._save_bot_message(conversation, response, "fallback", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        dlog("ORCHESTRATOR", "Paso 9: Nodo destino encontrado", node_key=next_node.node_key)
+
+        # --- Intake hooks ---
+        if current_node.node_key == "guia_familiar" and next_node.node_key == "pedir_foto":
+            _ctx = self.context_manager.get(conversation)
+            _ctx["intake_person_raw"] = message_text
+            conversation.context = json.dumps(_ctx)
+            dlog("ORCHESTRATOR", "Intake: datos crudos capturados", raw=message_text[:80])
+
+        if next_node.node_key == "reporte_guardado":
+            from app.core.intake import commit_report
+            _report = commit_report(self.db, conversation, client_phone, notes=message_text)
+            if _report:
+                dlog("ORCHESTRATOR", "Intake: report creado", report_id=_report.id)
+
+        # --- Paso 10: Context Manager ---
+        conversation.current_node_key = next_node.node_key
+        conversation.last_message_at = datetime.utcnow()
+        context = self.context_manager.update(conversation, intent_result, message_text)
+
+        dlog("ORCHESTRATOR", "Paso 10: Context Manager",
+             sentiment=context.get("sentiment_general", "neutral"))
+
+        # --- Paso 11: Response Generator ---
+        response, response_metodo = await self.response_generator.generate(
+            node=next_node,
+            operacion_id=operacion_id,
+            conversation=conversation,
+            intent_result=intent_result,
+            flow_engine=self.engine,
+        )
+        dlog("ORCHESTRATOR", "Paso 11: Response Generator",
+             metodo=response_metodo,
+             respuesta_preview=response[:120])
+
+        # --- Paso 12: Analytics Logger ---
+        self.analytics_logger.log_intent(conversation.id, operacion_id, intent_result, intent_latency_ms)
+        self.analytics_logger.log_decision(
+            conversation.id, operacion_id,
+            current_node.node_key, next_node.node_key,
+            razon, metodo,
+            intent_result.confidence, similarity_result.confidence,
+        )
+        self.analytics_logger.log_response(
+            conversation.id, operacion_id,
+            next_node.node_key, response_metodo,
+            len(response),
+        )
+
+        # --- Paso 13: Guardar mensaje del bot + commit ---
+        if next_node.node_key == "escalado_humano":
+            conversation.status = "escalated"
+
+        self._save_bot_message(
+            conversation, response,
+            node_key=next_node.node_key,
+            ai_generated=(response_metodo == "llm"),
+            ai_confidence=intent_result.confidence if intent_result else None,
+        )
+
+        logger.info(
+            "[BOT] phone=%s %s → %-20s",
+            client_phone,
+            current_node.node_key,
+            next_node.node_key,
+        )
+        dlog("ORCHESTRATOR", "FIN", nodo=next_node.node_key, respuesta=response)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Pedir foto — TTL + descarga + avance automático
+    # ------------------------------------------------------------------
+
+    async def _handle_pedir_foto(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        from app.config import get_settings
+        settings = get_settings()
+
+        context = self.context_manager.get(conversation)
+        pending_photos: list = context.get("pending_photos", [])
+        last_photo_at_str: Optional[str] = context.get("last_photo_at")
+
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, len(pending_photos))
+            pending_photos.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["pending_photos"] = pending_photos
+            context["last_photo_at"] = datetime.utcnow().isoformat()
+            conversation.context = json.dumps(context)
+
+            count = len(pending_photos)
+            dlog("ORCHESTRATOR", "Foto recibida en pedir_foto",
+                 count=count, max=settings.photo_max_count, local=local_path or "sin descarga")
+
+            if count >= settings.photo_max_count:
+                logger.info("[BOT] phone=%s pedir_foto → notas_adicionales (max_alcanzado, fotos=%d)", conversation.client_phone, count)
+                return self._advance_from_foto(conversation, operacion_id, context, count, "max_alcanzado")
+
+            logger.info("[BOT] phone=%s pedir_foto → pedir_foto (foto %d/%d)", conversation.client_phone, count, settings.photo_max_count)
+            response = (
+                f"📸 Imagen recibida ({count}/{settings.photo_max_count}).\n"
+                'Puedes enviar más fotos. Escribe *listo* cuando termines.'
+            )
+            self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Mensaje de texto en pedir_foto
+        count = len(pending_photos)
+
+        if message_text.strip().lower() == "listo":
+            logger.info("[BOT] phone=%s pedir_foto → notas_adicionales (listo, fotos=%d)", conversation.client_phone, count)
+            return self._advance_from_foto(conversation, operacion_id, context, count, "listo")
+
+        logger.info("[BOT] phone=%s pedir_foto → pedir_foto (texto sin listo, fotos=%d)", conversation.client_phone, count)
+        response = (
+            f"⏳ Tienes {count}/{settings.photo_max_count} foto(s) recibida(s).\n"
+            'Puedes enviar más o escribe *listo* para continuar.'
+        )
+        self._save_bot_message(conversation, response, "pedir_foto", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    def _advance_from_foto(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        context: dict,
+        photo_count: int,
+        motivo: str,
+    ) -> Tuple[str, bool]:
+        notas_node = self.engine._get_node_by_key(operacion_id, "notas_adicionales")
+        if notas_node:
+            response = self.engine._generate_response(notas_node, operacion_id, conversation)
+        else:
+            response = (
+                "📸 Imágenes recibidas.\n\n"
+                "¿Tienes señas, ropa u otros detalles? Escríbelos ahora.\n\n"
+                "O escribe *reporte* para registrar un nuevo caso."
+            )
+        conversation.current_node_key = "notas_adicionales"
+        dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
+             fotos=photo_count, motivo=motivo)
+        self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Hospital — registro de ubicación + recepción de listas
+    # ------------------------------------------------------------------
+
+    async def _handle_hospital_location(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        import re
+        from app.models.hospital import Hospital
+
+        if not message_text:
+            response = "Por favor envíen el nombre y ubicación de su hospital o refugio, o compartan su ubicación por WhatsApp."
+            self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Extraer lat/lng si viene de GPS
+        lat, lng, nombre = None, None, None
+        gps_match = re.search(r'GPS:\s*([-\d.]+),\s*([-\d.]+)', message_text)
+        if gps_match:
+            lat = float(gps_match.group(1))
+            lng = float(gps_match.group(2))
+            nombre = message_text.split(" (GPS:")[0].strip() or None
+        else:
+            nombre = message_text.strip()
+
+        # Upsert Hospital
+        hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == conversation.waha_chat_id).first()
+        if hospital:
+            hospital.nombre = nombre
+            hospital.ubicacion_texto = message_text
+            hospital.lat = lat
+            hospital.lng = lng
+        else:
+            hospital = Hospital(
+                wa_chat_id=conversation.waha_chat_id or conversation.client_phone,
+                nombre=nombre,
+                ubicacion_texto=message_text,
+                lat=lat,
+                lng=lng,
+            )
+            self.db.add(hospital)
+        self.db.commit()
+
+        conversation.current_node_key = "hospital_registrado"
+        registrado_node = self.engine._get_node_by_key(operacion_id, "hospital_registrado")
+        response = self.engine._generate_response(registrado_node, operacion_id, conversation) if registrado_node else "✅ Registro completado. Esperamos sus listas de ingresos. 🙏"
+
+        logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    async def _handle_hospital_lista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        from app.models.hospital import Hospital, HospitalLista
+
+        if media_url:
+            hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == (conversation.waha_chat_id or conversation.client_phone)).first()
+            lista_count = len(hospital.listas) if hospital else 0
+
+            local_path = await self._download_photo(media_url, conversation.id, lista_count)
+
+            if hospital:
+                self.db.add(HospitalLista(
+                    hospital_id=hospital.id,
+                    media_url=media_url,
+                    local_path=local_path,
+                ))
+                self.db.commit()
+                lista_count += 1
+
+            logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
+            response = f"📋 Lista recibida ({lista_count}). Puede continuar enviando más. Muchas gracias. 🙏"
+            self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
+        response = "Recibido. Cuando tengan listas de ingresos, envíen las fotos y las procesaremos. 🙏"
+        self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Rescatista — imagen y/o texto, TTL 60 s
+    # ------------------------------------------------------------------
+
+    async def _handle_rescatista_intake(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        context = self.context_manager.get(conversation)
+        pending_photos: list = context.get("pending_photos", [])
+        last_photo_at_str: Optional[str] = context.get("last_photo_at")
+
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, len(pending_photos))
+            pending_photos.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["pending_photos"] = pending_photos
+            context["last_photo_at"] = datetime.utcnow().isoformat()
+
+            caption = (message_text or "").strip()
+            if caption:
+                existing = context.get("intake_person_raw", "")
+                context["intake_person_raw"] = (existing + "\n" + caption).strip() if existing else caption
+
+            conversation.context = json.dumps(context)
+            count = len(pending_photos)
+
+            if caption:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen+caption recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Imagen recibida. Leí tu mensaje:\n"
+                    f"_{caption}_\n\n"
+                    "Puedes agregar más texto o enviar más fotos.\n"
+                    "Escribe *listo* para terminar este reporte."
+                )
+            else:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Imagen recibida ({count}).\n\n"
+                    "Puedes enviar más fotos o escribir texto para complementar el reporte.\n"
+                    "Escribe *listo* cuando termines."
+                )
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # — Texto —
+        text = (message_text or "").strip().lower()
+
+        # TTL: si hay fotos y pasaron 60 s desde la última → auto-commit
+        if pending_photos and last_photo_at_str:
+            try:
+                last_photo_at = datetime.fromisoformat(last_photo_at_str)
+                elapsed = (datetime.utcnow() - last_photo_at).total_seconds()
+                if elapsed >= 60:
+                    logger.info("[BOT] phone=%s guia_rescatista → TTL expirado (%.0fs)", conversation.client_phone, elapsed)
+                    return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "ttl_expired")
+            except Exception:
+                pass
+
+        if text == "listo":
+            logger.info("[BOT] phone=%s guia_rescatista → listo", conversation.client_phone)
+            return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "listo")
+
+        if text == "reporte":
+            context.pop("pending_photos", None)
+            context.pop("last_photo_at", None)
+            context.pop("intake_person_raw", None)
+            conversation.context = json.dumps(context)
+            guia_node = self.engine._get_node_by_key(operacion_id, "guia_rescatista")
+            response = self.engine._generate_response(guia_node, operacion_id, conversation) if guia_node else "Puedes enviar una nueva foto o descripción."
+            logger.info("[BOT] phone=%s guia_rescatista → reporte (reinicio)", conversation.client_phone)
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Texto libre
+        context["intake_person_raw"] = message_text
+        conversation.context = json.dumps(context)
+
+        if not pending_photos:
+            response = (
+                "📝 Descripción recibida.\n\n"
+                "Si tienes una foto, envíala ahora.\n"
+                "Escribe *listo* para registrar sin foto, o *reporte* para iniciar otro caso."
+            )
+        else:
+            response = (
+                f"📝 Descripción guardada. Tienes {len(pending_photos)} foto(s).\n"
+                "Escribe *listo* para finalizar o envía más fotos."
+            )
+
+        logger.info("[BOT] phone=%s guia_rescatista → texto libre (fotos=%d)", conversation.client_phone, len(pending_photos))
+        self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    def _advance_rescatista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        context: dict,
+        photo_count: int,
+        motivo: str,
+    ) -> Tuple[str, bool]:
+        from app.core.intake import commit_report
+        _report = commit_report(self.db, conversation, conversation.client_phone, kind="found")
+        if _report:
+            dlog("ORCHESTRATOR", "Rescatista: report creado", report_id=_report.id, fotos=photo_count, motivo=motivo)
+
+        guardado_node = self.engine._get_node_by_key(operacion_id, "rescatista_guardado")
+        if guardado_node:
+            response = self.engine._generate_response(guardado_node, operacion_id, conversation)
+        else:
+            response = "✅ Caso registrado. Escribe *reporte* para registrar otro."
+
+        conversation.current_node_key = "rescatista_guardado"
+        self._save_bot_message(conversation, response, "rescatista_guardado", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    async def _download_photo(
+        self,
+        media_url: str,
+        conversation_id: int,
+        index: int,
+    ) -> Optional[str]:
+        import httpx
+        from app.config import get_settings
+        settings = get_settings()
+
+        storage_dir = settings.photo_storage_path
+        os.makedirs(storage_dir, exist_ok=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(media_url)
+                resp.raise_for_status()
+
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                ext = "jpg"
+                if "png" in content_type:
+                    ext = "png"
+                elif "webp" in content_type:
+                    ext = "webp"
+                elif "gif" in content_type:
+                    ext = "gif"
+
+                filename = f"{conversation_id}_{index}.{ext}"
+                local_path = os.path.join(storage_dir, filename)
+
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+
+                logger.info("Foto descargada: %s → %s", media_url, local_path)
+                return local_path
+        except Exception as e:
+            logger.warning("No se pudo descargar foto %s: %s", media_url, e)
+            return None
+
+    # ------------------------------------------------------------------
+    # Guardar mensaje del bot
+    # ------------------------------------------------------------------
+
+    def _save_bot_message(
+        self,
+        conversation: Conversacion,
+        response: str,
+        node_key: Optional[str],
+        ai_generated: bool,
+        ai_confidence: Optional[float],
+    ) -> None:
+        message = MensajeConversacion(
+            conversacion_id=conversation.id,
+            sender_type="bot",
+            message_text=response,
+            node_key=node_key,
+            ai_generated=ai_generated,
+            ai_confidence=ai_confidence,
+        )
+        self.db.add(message)
+        self.db.commit()
+
+    # ------------------------------------------------------------------
+    # Similarity matching (async wrapper)
+    # ------------------------------------------------------------------
+
+    async def _run_similarity_matching(
+        self,
+        current_node,
+        message_text: str,
+        conversation: Conversacion,
+    ) -> SimilarityResult:
+        """
+        Navega exclusivamente por next_node_map, sin expected_responses.
+        Prioridad: clave exacta (case-insensitive) → "default" → sin match.
+        """
+        if not current_node.next_node_map or not message_text.strip():
+            return SimilarityResult()
+
+        try:
+            next_map = (
+                json.loads(current_node.next_node_map)
+                if isinstance(current_node.next_node_map, str)
+                else current_node.next_node_map
+            )
+        except Exception:
+            return SimilarityResult()
+
+        text = message_text.strip().lower()
+
+        for key, next_node_key in next_map.items():
+            if key == "default":
+                continue
+            if text in [opt.strip() for opt in key.split("|")]:
+                dlog("SIMILARITY", "Match exacto", matched=text, next=next_node_key)
+                return self.decision_engine.build_similarity_result(text, next_node_key)
+
+        default_key = next_map.get("default")
+        if default_key:
+            dlog("SIMILARITY", "Default advance", next=default_key)
+            return self.decision_engine.build_similarity_result(text, default_key)
+
+        return SimilarityResult()
