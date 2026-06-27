@@ -112,7 +112,7 @@ DEFAULT_NODES = [
             "¿Qué deseas hacer ahora?\n"
             "*1* — Reportar otro familiar\n"
             "*2* — Soy rescatista\n"
-            "*3* — Enviar lista de ingresos\n\n"
+            "*3* — Ingresos de Pacientes Hospitalarios\n\n"
             "O escribe *inicio* para volver al menú principal."
         ),
         "expected_responses": None,
@@ -158,7 +158,7 @@ DEFAULT_NODES = [
             "¿Qué deseas hacer ahora?\n"
             "*reporte* — Registrar otro caso\n"
             "*1* — Soy familiar\n"
-            "*3* — Enviar lista de ingresos\n\n"
+            "*3* — Ingresos de Pacientes Hospitalarios\n\n"
             "O escribe *inicio* para volver al menú principal."
         ),
         "expected_responses": None,

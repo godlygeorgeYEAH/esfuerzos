@@ -69,7 +69,7 @@ _LIST_REPORTE_GUARDADO = {
     "sections": [{"title": "Continuar", "rows": [
         {"title": "Reportar otro familiar",   "rowId": "1",      "description": None},
         {"title": "Soy rescatista",           "rowId": "2",      "description": None},
-        {"title": "Enviar lista de ingresos", "rowId": "3",      "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",      "description": None},
         {"title": "Menú principal",           "rowId": "inicio", "description": None},
     ]}],
 }
@@ -82,7 +82,7 @@ _LIST_RESCATISTA_GUARDADO = {
     "sections": [{"title": "Continuar", "rows": [
         {"title": "Registrar otro caso",      "rowId": "reporte", "description": None},
         {"title": "Soy familiar",             "rowId": "1",       "description": None},
-        {"title": "Enviar lista de ingresos", "rowId": "3",       "description": None},
+        {"title": "Ingresos de Pacientes Hospitalarios", "rowId": "3",       "description": None},
         {"title": "Menú principal",           "rowId": "inicio",  "description": None},
     ]}],
 }
