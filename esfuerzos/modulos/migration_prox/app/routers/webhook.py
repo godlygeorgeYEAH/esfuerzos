@@ -80,7 +80,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
     is_from_me = payload_data.get("fromMe", False)
     body_preview = (payload_data.get("body") or "").strip()
 
-    logger.info(
+    logger.debug(
         "WAHA webhook recibido | operacion=%s (id=%d) | session=%s | event=%s | from=%s | fromMe=%s | body=%s",
         operacion.slug,
         operacion.id,
@@ -99,10 +99,8 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         from app.config import get_settings as _get_settings
         _settings = _get_settings()
         if not (is_from_me and _settings.bot_self_message_testing and body_preview.startswith("/")):
-            logger.info("DESCARTADO | reason=message.any_not_testing | from=%s | fromMe=%s", payload_data.get("from", "?"), is_from_me)
             return {"status": "ignored", "reason": "message.any_not_testing"}
     elif event != "message":
-        logger.info("DESCARTADO | reason=event_no_es_message | event=%s", event)
         return {"status": "ignored", "reason": f"event={event}"}
 
     # Ignorar mensajes propios que no sean de testing
@@ -110,7 +108,6 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
         from app.config import get_settings as _get_settings
         _settings = _get_settings()
         if not (_settings.bot_self_message_testing and body_preview.startswith("/")):
-            logger.info("DESCARTADO | reason=fromMe | from=%s", payload_data.get("from", "?"))
             return {"status": "ignored", "reason": "fromMe"}
 
     message_text = (payload_data.get("body") or "").strip()
@@ -165,7 +162,7 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     # Ignorar si no hay texto ni media
     if not message_text and not media_url:
-        logger.info("DESCARTADO | reason=empty_body | from=%s", payload_data.get("from", "?"))
+        logger.debug("DESCARTADO | reason=empty_body | from=%s", payload_data.get("from", "?"))
         return {"status": "ignored", "reason": "empty_body"}
 
     # Extraer número de teléfono del cliente (formato: 584121234567@c.us → 584121234567)
@@ -173,13 +170,13 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     # Ignorar Estados de WhatsApp (Stories) — llegan como status@broadcast o *@broadcast
     if chat_id == "status@broadcast" or chat_id.endswith("@broadcast"):
-        logger.info("DESCARTADO | reason=status_broadcast | chat_id=%s", chat_id)
+        logger.debug("DESCARTADO | reason=status_broadcast | chat_id=%s", chat_id)
         return {"status": "ignored", "reason": "status_broadcast"}
 
     client_phone = chat_id.split("@")[0] if "@" in chat_id else chat_id
 
     if not client_phone:
-        logger.info("DESCARTADO | reason=no_phone | from=%s", payload_data.get("from", "?"))
+        logger.warning("DESCARTADO | reason=no_phone | from=%s", payload_data.get("from", "?"))
         return {"status": "ignored", "reason": "no_phone"}
 
     # @lid es un identificador de dispositivo WAHA distinto al número de teléfono.

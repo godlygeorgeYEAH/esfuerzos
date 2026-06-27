@@ -87,7 +87,7 @@ class DecisionEngine:
         return self._decision("fallback", "no_clear_intent", "fallback", intent, similarity)
 
     def _decision(self, target_node_key, razon, metodo, intent, similarity) -> Tuple[str, str, str]:
-        logger.info(
+        logger.debug(
             f"DecisionEngine | {razon} | "
             f"intent={intent.intencion_principal if intent else 'none'}({intent.confidence if intent else 0:.2f}) | "
             f"similarity={similarity.match}({similarity.confidence:.2f}) | "

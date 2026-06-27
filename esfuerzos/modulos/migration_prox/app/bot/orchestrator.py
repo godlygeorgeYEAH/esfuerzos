@@ -769,7 +769,7 @@ class Orchestrator:
                 with open(local_path, "wb") as f:
                     f.write(resp.content)
 
-                logger.info("Foto descargada: %s → %s", media_url, local_path)
+                logger.debug("Foto descargada: %s → %s", media_url, local_path)
                 return local_path
         except Exception as e:
             logger.warning("No se pudo descargar foto %s: %s", media_url, e)
