@@ -34,13 +34,13 @@ services:
   # WAHA — WhatsApp HTTP API (free tier, una sesión)
   # ----------------------------------------------------------------
   waha:
-    image: devlikeapro/waha-plus
+    image: devlikeapro/waha
     container_name: reune_waha
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
       WAHA_API_KEY: ${WAHA_API_KEY:-}
     volumes:
       - waha_sessions:/app/.wwebjs_auth
