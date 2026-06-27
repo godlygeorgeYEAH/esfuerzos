@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 # Thresholds
 TEXT_MATCH_THRESHOLD: float = 0.75
 FACE_MATCH_THRESHOLD: float = 0.50
-COMBINED_THRESHOLD: float = 0.65
+COMBINED_THRESHOLD: float = 0.65   # when both text + face available
+TEXT_ONLY_THRESHOLD: float = 0.82  # higher bar when no face confirmation
+FACE_ONLY_THRESHOLD: float = 0.65  # face alone is specific enough
 
 FACE_WEIGHT: float = 0.35
 TEXT_WEIGHT: float = 0.65
@@ -277,8 +279,9 @@ async def _text_match_one(
         if text_score < TEXT_MATCH_THRESHOLD:
             continue
 
-        combined_score = TEXT_WEIGHT * text_score
-        if combined_score < COMBINED_THRESHOLD:
+        # Text-only match: use raw text score, higher standalone threshold
+        combined_score = text_score
+        if combined_score < TEXT_ONLY_THRESHOLD:
             continue
 
         # Normalise to missing_id / found_id
@@ -443,8 +446,9 @@ async def _face_match_one(
         if face_score < FACE_MATCH_THRESHOLD:
             continue
 
-        combined_score = FACE_WEIGHT * face_score
-        if combined_score < COMBINED_THRESHOLD:
+        # Face-only match: use raw face score, face alone is specific
+        combined_score = face_score
+        if combined_score < FACE_ONLY_THRESHOLD:
             continue
 
         if target_kind == "found":
