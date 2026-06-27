@@ -524,7 +524,7 @@ class Orchestrator:
             return response, True
 
         logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
-        response = "Para enviar listas adjunta una foto. Escribe *cambiar* si necesitas reportar otra institución. 🙏"
+        response = "Para enviar listas adjunta una foto. Escribe *cambiar* para reportar otra institución o *inicio* para volver al menú principal. 🙏"
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
