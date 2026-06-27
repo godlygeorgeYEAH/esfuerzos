@@ -37,12 +37,13 @@ def get_face_embedding(image_bytes: bytes, face_model) -> tuple[list[float] | No
 
 
 def build_text_for_embedding(report: dict) -> str:
+    # Only name + age + distinguishing_marks (may contain CI/cedula).
+    # Location excluded: disaster victims from same zone share location,
+    # causing false positives between unrelated people.
     parts = [
         report.get("full_name"),
         str(report.get("age")) if report.get("age") is not None else None,
-        report.get("last_seen_location"),
         report.get("distinguishing_marks"),
-        report.get("clothing"),
     ]
     text = " ".join(p for p in parts if p).strip()
     return _clean_text(text)
