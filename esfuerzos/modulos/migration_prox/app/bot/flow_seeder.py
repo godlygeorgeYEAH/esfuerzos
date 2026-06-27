@@ -109,7 +109,8 @@ DEFAULT_NODES = [
         "message_template": (
             "✅ *Reporte registrado.*\n\n"
             "Si encontramos una coincidencia en nuestra base de datos, "
-            "te lo haremos saber de inmediato."
+            "te lo haremos saber de inmediato.\n\n"
+            "_No confirmamos coincidencias sin verificación humana previa._"
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({

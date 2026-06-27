@@ -62,9 +62,9 @@ _LIST_BIENVENIDA = {
 }
 
 _LIST_REPORTE_GUARDADO = {
-    "title": "✅ Reporte registrado",
-    "description": "¿Qué deseas hacer ahora?",
-    "footer": "No confirmamos coincidencias sin verificación humana previa.",
+    "title": "¿Qué deseas hacer ahora?",
+    "description": "",
+    "footer": "",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
         {"title": "Reportar otro desaparecido",          "rowId": "1",      "description": None},
