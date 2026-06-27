@@ -135,7 +135,7 @@ match_reports_by_face(
 ## Container layout
 
 ```
-/app/                   <- api/ bind-mounted from host /root/reune/api/
+/app/                   <- repo root bind-mounted (or image COPY .)
 /root/.insightface/     <- named volume (model cache, ~500MB)
 /root/.cache/huggingface/ <- named volume (SentenceTransformer cache, ~500MB)
 /root/sos_images/       <- host bind mount (read-only, 50k WebP photos)

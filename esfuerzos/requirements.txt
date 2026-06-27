@@ -1,8 +1,0 @@
-﻿aiohttp>=3.9
-beautifulsoup4>=4.12
-fastapi>=0.111
-uvicorn>=0.29
-playwright>=1.44
-playwright-stealth>=1.0
-python-dotenv>=1.0
-rapidfuzz>=3.9
