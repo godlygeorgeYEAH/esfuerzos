@@ -93,10 +93,10 @@ _LIST_HOSPITAL_NAV_ROWS = [
 ]
 
 
-def _hospital_nav_list(title: str, description: str) -> dict:
+def _hospital_nav_list() -> dict:
     return {
-        "title": title,
-        "description": description,
+        "title": "👇 ¿Necesitas hacer algo más?",
+        "description": "Utiliza alguna de estas opciones.",
         "footer": "",
         "button": "Opciones",
         "sections": [{"title": "Navegación", "rows": _LIST_HOSPITAL_NAV_ROWS}],
@@ -112,7 +112,8 @@ class Orchestrator:
         self.context_manager = ContextManager()
         self.response_generator = ResponseGenerator()
         self.analytics_logger = AnalyticsLogger(db)
-        self._pending_list: Optional[dict] = None  # payload para sendList; el webhook lo lee tras process_message
+        self._pending_list: Optional[dict] = None       # payload para sendList; el webhook lo lee tras process_message
+        self._pre_list_message: Optional[str] = None  # texto a enviar antes del sendList (solo flujo hospital)
 
     async def process_message(
         self,
@@ -122,7 +123,8 @@ class Orchestrator:
         media_url: Optional[str] = None,
         waha_chat_id: Optional[str] = None,
     ) -> Tuple[str, bool]:
-        self._pending_list = None  # reset por cada mensaje
+        self._pending_list = None      # reset por cada mensaje
+        self._pre_list_message = None  # reset por cada mensaje
         dlog("ORCHESTRATOR", "INICIO",
              operacion_id=operacion_id,
              phone=client_phone,
@@ -552,10 +554,8 @@ class Orchestrator:
             "Envía fotos de las listas de ingresos cuando puedas — "
             "cada registro ayuda a conectar familias."
         )
-        self._pending_list = _hospital_nav_list(
-            title=f"Reportando para {nombre}",
-            description="Envía fotos de las listas de ingresos cuando puedas — cada registro ayuda a conectar familias.",
-        )
+        self._pre_list_message = response
+        self._pending_list = _hospital_nav_list()
 
         logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
@@ -596,19 +596,15 @@ class Orchestrator:
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
             response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
-            self._pending_list = _hospital_nav_list(
-                title=f"📋 Lista recibida ({lista_count})",
-                description="Puedes seguir enviando más. Muchas gracias. 🙏",
-            )
+            self._pre_list_message = response
+            self._pending_list = _hospital_nav_list()
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
         logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
-        response = "Para enviar listas adjunta una foto."
-        self._pending_list = _hospital_nav_list(
-            title="Listas de ingresos",
-            description="Para enviar listas adjunta una foto.",
-        )
+        response = "Para enviar listas adjunta una foto. 📸"
+        self._pre_list_message = response
+        self._pending_list = _hospital_nav_list()
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
