@@ -6,8 +6,8 @@ Queries all registered search sources in parallel, stores leads, sends follow-up
 
 Usage (in flows.py::create_report, after successful DB insert):
     import asyncio
-    from api.search_orchestrator import run_exploratory_search
-    from api.scrapers.base import SearchQuery, parse_age_int
+    from search_orchestrator import run_exploratory_search
+    from scrapers.base import SearchQuery, parse_age_int
 
     asyncio.create_task(
         run_exploratory_search(
@@ -57,9 +57,9 @@ from typing import Any
 import httpx
 
 # Import scrapers package to trigger __init_subclass__ registration
-import api.scrapers  # noqa: F401
+import scrapers  # noqa: F401
 
-from api.scrapers.base import BaseSearchSource, SearchQuery, SearchResult
+from scrapers.base import BaseSearchSource, SearchQuery, SearchResult
 
 logger = logging.getLogger(__name__)
 

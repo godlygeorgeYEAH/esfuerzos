@@ -437,14 +437,13 @@ class Orchestrator:
         media_url: Optional[str],
     ) -> Tuple[str, bool]:
         import re
-        from app.models.hospital import Hospital
+        from app.services.hospital_service import upsert_hospital
 
         if not message_text:
             response = "Por favor envíen el nombre y ubicación de su hospital o refugio, o compartan su ubicación por WhatsApp."
             self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
             return response, True
 
-        # Extraer lat/lng si viene de GPS
         lat, lng, nombre = None, None, None
         gps_match = re.search(r'GPS:\s*([-\d.]+),\s*([-\d.]+)', message_text)
         if gps_match:
@@ -454,23 +453,8 @@ class Orchestrator:
         else:
             nombre = message_text.strip()
 
-        # Upsert Hospital
-        hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == conversation.waha_chat_id).first()
-        if hospital:
-            hospital.nombre = nombre
-            hospital.ubicacion_texto = message_text
-            hospital.lat = lat
-            hospital.lng = lng
-        else:
-            hospital = Hospital(
-                wa_chat_id=conversation.waha_chat_id or conversation.client_phone,
-                nombre=nombre,
-                ubicacion_texto=message_text,
-                lat=lat,
-                lng=lng,
-            )
-            self.db.add(hospital)
-        self.db.commit()
+        wa_chat_id = conversation.waha_chat_id or conversation.client_phone
+        upsert_hospital(wa_chat_id, nombre, message_text, lat, lng)
 
         conversation.current_node_key = "hospital_registrado"
         registrado_node = self.engine._get_node_by_key(operacion_id, "hospital_registrado")
@@ -487,22 +471,18 @@ class Orchestrator:
         message_text: str,
         media_url: Optional[str],
     ) -> Tuple[str, bool]:
-        from app.models.hospital import Hospital, HospitalLista
+        from app.services.hospital_service import add_lista
 
         if media_url:
-            hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == (conversation.waha_chat_id or conversation.client_phone)).first()
-            lista_count = len(hospital.listas) if hospital else 0
+            wa_chat_id = conversation.waha_chat_id or conversation.client_phone
+            local_path = await self._download_photo(media_url, conversation.id, 0)
+            add_lista(wa_chat_id, media_url, local_path)
 
-            local_path = await self._download_photo(media_url, conversation.id, lista_count)
-
-            if hospital:
-                self.db.add(HospitalLista(
-                    hospital_id=hospital.id,
-                    media_url=media_url,
-                    local_path=local_path,
-                ))
-                self.db.commit()
-                lista_count += 1
+            context = self.context_manager.get(conversation)
+            lista_count = context.get("hospital_lista_count", 0) + 1
+            context["hospital_lista_count"] = lista_count
+            conversation.context = json.dumps(context)
+            self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
             response = f"📋 Lista recibida ({lista_count}). Puede continuar enviando más. Muchas gracias. 🙏"

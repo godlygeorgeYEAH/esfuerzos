@@ -21,14 +21,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 _SOURCES = [
-    ("api.scrapers.internal_source", "InternalReunionSource"),
-    ("api.scrapers.hospitales_ve",   "HospitalesVESource"),
+    ("scrapers.internal_source", "InternalReunionSource"),
+    ("scrapers.hospitales_ve",   "HospitalesVESource"),
     # redayuda_ve: full scraper + search (BaseVEScraper + BaseSearchSource, source_name="redayuda_ve")
     # Canonical implementation. red_ayuda.py removed (duplicate, hardcoded key).
-    ("api.scrapers.redayuda_ve",     "RedAyudaVEScraper"),
-    ("api.scrapers.reconexion",      "ReconexionScraper"),
-    ("api.scrapers.sos_venezuela",   "SOSVenezuelaScraper"),
-    ("api.scrapers.venezreporta",    "VenezReportaScraper"),
+    ("scrapers.redayuda_ve",     "RedAyudaVEScraper"),
+    ("scrapers.reconexion",      "ReconexionScraper"),
+    ("scrapers.sos_venezuela",   "SOSVenezuelaScraper"),
+    ("scrapers.venezreporta",    "VenezReportaScraper"),
 ]
 
 for _module, _class in _SOURCES:
