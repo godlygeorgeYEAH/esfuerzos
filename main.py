@@ -37,6 +37,7 @@ from base44_webhook_router import router as base44_router
 from config import get_settings
 from consolidation_pipeline import (
     compute_text_embeddings,
+    run_cedula_exact_match,
     run_text_cross_match,
     run_face_cross_match,
     run_full_consolidation,
@@ -242,6 +243,9 @@ async def admin_consolidate(
     elif phase == 3:
         background_tasks.add_task(run_face_cross_match, app)
         msg = "Phase 3: face cross-match started"
+    elif phase == 4:
+        background_tasks.add_task(run_cedula_exact_match, app)
+        msg = "Phase 0: cedula exact match started"
     else:
         background_tasks.add_task(run_full_consolidation, app)
         msg = "Full consolidation pipeline started (phases 1-3)"

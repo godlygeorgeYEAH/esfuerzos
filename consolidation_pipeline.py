@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -63,6 +64,13 @@ _GENERIC_NAMES = {
     "persona sin identificar", "nn", "n.n.", "n/n", "menor",
     "paciente sin identificar", "paciente desconocido", "femenino", "masculino",
 }
+# Prefix-based check for variants like "Menor reportado - Edificio Sayemar"
+_GENERIC_NAME_PREFIXES = tuple(_GENERIC_NAMES)
+
+
+def _is_generic_name(name: str) -> bool:
+    n = name.lower().strip()
+    return n in _GENERIC_NAMES or n.startswith(_GENERIC_NAME_PREFIXES)
 
 
 def _sb_headers(key: str, prefer: str = "") -> dict:
@@ -133,7 +141,7 @@ async def compute_text_embeddings(
             for row in rows:
                 name = (row.get("full_name") or "").strip()
                 name_lower = name.lower()
-                if name_lower.startswith(_NOISE_NAME_PREFIX) or name_lower in _GENERIC_NAMES:
+                if name_lower.startswith(_NOISE_NAME_PREFIX) or _is_generic_name(name):
                     skipped_noise += 1
                     continue
                 text = build_text_for_embedding(row)
@@ -533,7 +541,7 @@ async def embed_and_match_report(
         return
 
     name = (report_data.get("full_name") or "").strip()
-    if name.lower().startswith(_NOISE_NAME_PREFIX):
+    if name.lower().startswith(_NOISE_NAME_PREFIX) or _is_generic_name(name):
         return
 
     text = build_text_for_embedding(report_data)
@@ -560,15 +568,117 @@ async def embed_and_match_report(
 
 
 # ---------------------------------------------------------------------------
+# Phase 0: Cedula (national ID) exact matching
+# ---------------------------------------------------------------------------
+
+_CEDULA_RE = re.compile(r'CI[:\s]+(\d{5,10})', re.IGNORECASE)
+
+
+def _extract_cedula(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = _CEDULA_RE.search(text)
+    return m.group(1) if m else None
+
+
+async def run_cedula_exact_match(app: Any) -> dict:
+    """
+    Phase 0: Exact cedula (national ID) matching between found and missing.
+
+    Extracts CI: XXXXXXX from distinguishing_marks. Found records with a
+    cedula are matched against missing records with the same cedula.
+    Inserts pairs with combined_score=1.0 and status='pending'.
+
+    Returns: {"pairs_checked": N, "matches_inserted": N}
+    """
+    import re as _re
+    sb_url: str = app.state.supabase_url.rstrip("/")
+    sb_key: str = app.state.supabase_service_key
+
+    pairs_checked = 0
+    matches_inserted = 0
+
+    logger.info("Phase 0: cedula exact matching")
+
+    # Fetch found records with cedula in marks
+    async with httpx.AsyncClient(timeout=30) as cl:
+        r = await cl.get(
+            f"{sb_url}/rest/v1/reports",
+            headers=_sb_headers(sb_key),
+            params={
+                "select": "id,distinguishing_marks",
+                "kind": "eq.found",
+                "distinguishing_marks": "ilike.*CI:*",
+                "limit": "5000",
+            },
+        )
+    if r.status_code not in (200, 206):
+        logger.error("Phase 0: fetch found failed %d", r.status_code)
+        return {"pairs_checked": 0, "matches_inserted": 0}
+
+    found_rows = [
+        (row["id"], _extract_cedula(row.get("distinguishing_marks")))
+        for row in r.json()
+        if _extract_cedula(row.get("distinguishing_marks"))
+    ]
+    logger.info("Phase 0: %d found records have cedula", len(found_rows))
+
+    for found_id, cedula in found_rows:
+        pairs_checked += 1
+        # Search missing records with matching cedula in marks
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r2 = await cl.get(
+                f"{sb_url}/rest/v1/reports",
+                headers=_sb_headers(sb_key),
+                params={
+                    "select": "id",
+                    "kind": "eq.missing",
+                    "distinguishing_marks": f"ilike.*{cedula}*",
+                    "limit": "10",
+                },
+            )
+        if r2.status_code not in (200, 206):
+            continue
+
+        for missing_row in r2.json():
+            missing_id = missing_row["id"]
+            row = {
+                "id": str(uuid.uuid4()),
+                "missing_id": missing_id,
+                "found_id": found_id,
+                "text_score": 1.0,
+                "face_score": 0.0,
+                "combined_score": 1.0,
+                "status": "pending",
+            }
+            async with httpx.AsyncClient(timeout=10) as cl:
+                resp = await cl.post(
+                    f"{sb_url}/rest/v1/matches",
+                    headers=_sb_headers(sb_key, "resolution=ignore-duplicates,return=minimal"),
+                    json=row,
+                )
+            if resp.status_code in (200, 201):
+                matches_inserted += 1
+                logger.info("Cedula match CI:%s missing=%s found=%s", cedula, missing_id, found_id)
+
+    logger.info("Phase 0 done: checked=%d inserted=%d", pairs_checked, matches_inserted)
+    return {"pairs_checked": pairs_checked, "matches_inserted": matches_inserted}
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline entry point
 # ---------------------------------------------------------------------------
 
 async def run_full_consolidation(app: Any) -> dict:
-    """Run all three phases in sequence. Idempotent."""
+    """Run all phases in sequence. Idempotent. Phase 0 runs before Phase 2."""
+    import re  # noqa: F401 (needed for _CEDULA_RE if not already at module level)
     logger.info("Starting full data consolidation pipeline")
 
     p1 = await compute_text_embeddings(app)
     logger.info("Phase 1 done: %s", p1)
+
+    p0 = await run_cedula_exact_match(app)
+    logger.info("Phase 0 done: %s", p0)
 
     p2 = await run_text_cross_match(app)
     logger.info("Phase 2 done: %s", p2)
@@ -576,4 +686,4 @@ async def run_full_consolidation(app: Any) -> dict:
     p3 = await run_face_cross_match(app)
     logger.info("Phase 3 done: %s", p3)
 
-    return {"phase1": p1, "phase2": p2, "phase3": p3}
+    return {"phase0": p0, "phase1": p1, "phase2": p2, "phase3": p3}
