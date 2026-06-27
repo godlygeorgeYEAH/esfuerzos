@@ -135,7 +135,7 @@ DEFAULT_NODES = [
             "📍 Dónde está exactamente (refugio, hospital, dirección)\n"
             "❤️ Cómo está (consciente, herida, estable)\n"
             "🪪 Su nombre, si puede decírtelo\n\n"
-            "Escribe *listo* cuando termines."
+            "Envía la información en el orden que puedas, nosotros la organizamos."
         ),
         "expected_responses": None,
         "next_node_map": None,
