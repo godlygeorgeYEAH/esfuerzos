@@ -2,7 +2,7 @@
 
 Sistema de reunificación familiar por WhatsApp. Cruza reportes de personas desaparecidas y encontradas por datos y por cara, deduplica, y entrega coincidencias a revisión humana.
 
-**Para:** Claude Code · **Estado:** listo para construir · **Fecha:** junio 2026
+**Para:** Claude Code · **Estado:** en desarrollo — módulo WhatsApp operativo · **Fecha:** junio 2026
 
 ---
 
@@ -55,14 +55,15 @@ Terremoto doblete M7.2 / M7.5, 24 jun 2026, Venezuela. La data de desaparecidos 
 
 ## 5. Stack
 
-| Capa | Tecnología |
-|------|-----------|
-| Backend | Supabase Edge Functions (Deno / TypeScript) |
-| DB | Supabase Postgres con pgvector |
-| Reconocimiento facial | CompreFace en Docker sobre GCP (Compute Engine o Cloud Run), modelo InsightFace / ArcFace, `ANONYMIZE_DATA=true` |
-| Mensajería | WhatsApp Cloud API (Graph API v22 o superior) |
-| Consola de revisión | Lovable consumiendo Supabase |
-| Embeddings de texto | text-embedding-3-small (1536 dim) u otro equivalente |
+| Capa | Tecnología | Estado |
+|------|-----------|--------|
+| Backend | FastAPI + SQLAlchemy 2.0 (Python 3.11) | ✅ operativo |
+| DB | SQLite (desarrollo) / PostgreSQL (producción) | ✅ operativo |
+| Mensajería | WAHA (WhatsApp HTTP API, auto-hospedado) | ✅ operativo |
+| Reconocimiento facial | CompreFace en Docker (GCP), InsightFace/ArcFace 512 dim | pendiente |
+| Embeddings de texto | text-embedding-3-small (1536 dim) | pendiente |
+| Consola de revisión | Lovable | pendiente |
+| Infraestructura | Docker Compose (bot + waha en la misma red) | ✅ operativo |
 
 ---
 
@@ -144,12 +145,12 @@ create index on matches (status);
 
 ### 7.1 Intake WhatsApp (webhook)
 
-- Verificar el webhook con `hub.challenge`.
-- Recibir mensajes de texto, imagen (descargar por media id vía Graph API) y respuestas de Flow.
-- Dos entradas por botones interactivos: **"Reporto un desaparecido"** y **"Soy rescatista"**.
-- Campos estructurados vía WhatsApp Flows: nombre, edad, última ubicación, señas, ropa.
-- Fotos múltiples: agrupar mensajes por sesión con clave `reporter_wa_hash` y TTL.
-- Dentro de la ventana de 24h las respuestas libres son válidas. Guardar el `wa_id` hasheado.
+- WAHA entrega los mensajes vía `POST /webhook/waha`. No requiere `hub.challenge` ni verificación de Meta.
+- Recibir mensajes de texto e imagen. Las fotos llegan con `hasMedia: true` y una `mediaUrl` directa servida por WAHA.
+- Dos flujos conversacionales de texto guiado: **"Reporto un desaparecido"** y **"Soy rescatista / encontré a alguien"**.
+- Campos recopilados mediante conversación estructurada: nombre, edad, última ubicación, señas, ropa.
+- Fotos múltiples: agrupar mensajes por sesión con clave `reporter_wa_hash` y TTL. El usuario envía "listo" para cerrar la sesión de fotos.
+- Sin restricción de ventana de 24h: WAHA permite mensajes libres en cualquier momento.
 
 ### 7.2 Embeddings y gate de calidad
 
@@ -172,24 +173,26 @@ create index on matches (status);
 - Acciones: **confirmar** o **descartar**. Al confirmar, disparar la notificación. Registrar en `audit_log`.
 - Auth obligatoria, rol `reviewer`.
 
-### 7.5 Notificación (plantilla Utility)
+### 7.5 Notificación
 
-- Al confirmar un match, enviar la plantilla Utility aprobada al `wa_id` de la familia.
-- Texto provisional: *"Tenemos una posible coincidencia con tu reporte de {{1}}. Un voluntario la verificará y te contactará pronto."*
+- Al confirmar un match, enviar un mensaje libre de texto al número de la familia vía WAHA `send_message`.
+- Texto provisional: *"Tenemos una posible coincidencia con tu reporte de [nombre]. Un voluntario la verificará y te contactará pronto."*
 - Nunca incluir estado ni detalles. El humano hace el contacto.
+- No se requieren plantillas aprobadas por Meta; WAHA permite mensajes salientes sin restricciones de template.
 
 ---
 
-## 8. WhatsApp Cloud API — restricciones
+## 8. WAHA — consideraciones operacionales
 
-| Restricción | Detalle |
-|-------------|---------|
-| **Ventana de 24h** | Texto libre solo dentro de las 24h desde el último mensaje del usuario. Fuera, solo plantilla aprobada. |
-| **Plantilla Utility** | Gratis si se envía dentro de la ventana de 24h, se cobra fuera. Enviar a aprobación antes de usar (hasta 24h de revisión). |
-| **Volumen** | 250 conversaciones iniciadas por el negocio en 24h (compartidas en el portfolio). Las iniciadas por el usuario no cuentan. Para superar 250 se necesita verificación de negocio de Meta (2-10 días). **Arrancar la verificación ya.** |
-| **Media** | Descargar por media id vía Graph API. Las fotos múltiples llegan como mensajes separados. |
-| **Opt-in** | Obligatorio. El quality rating puede pausar plantillas si los usuarios reportan. |
-| **Errores comunes** | `131026` fuera de ventana · `131047` número no registrado en WhatsApp |
+| Consideración | Detalle |
+|---------------|---------|
+| **Sin ventana de 24h** | WAHA no impone la restricción de Meta. Se puede responder en cualquier momento sin plantillas. |
+| **Sin aprobación de templates** | Los mensajes de notificación son texto libre; no requieren aprobación previa ni Business Manager. |
+| **Volumen** | Limitado por la capacidad del dispositivo/número. Para alta concurrencia, usar múltiples sesiones WAHA. |
+| **Media** | Las fotos llegan con `mediaUrl` directa servida por el servidor WAHA. Se descarga con un GET simple. |
+| **Sin opt-in formal de Meta** | El usuario inicia la conversación; eso constituye el consentimiento implícito del canal. El sistema registra consentimiento explícito durante el intake. |
+| **Sesión WAHA** | Requiere mantener la sesión WhatsApp Web activa. Configurar reinicio automático ante desconexión. |
+| **Token de webhook** | Opcional: `X-WAHA-Token` en la cabecera para validar el origen. Configurado en `WAHA_WEBHOOK_SECRET`. |
 
 ---
 
@@ -204,50 +207,57 @@ create index on matches (status);
 
 ## 10. Seguridad
 
-- Verificar la firma de Meta del webhook con `X-Hub-Signature-256`.
-- Secrets en variables de entorno o Supabase Vault, nunca en el repo.
+- Validar el token de webhook WAHA con `X-WAHA-Token` (comparación constante via `secrets.compare_digest`).
+- Secrets en variables de entorno, nunca en el repo.
 - RLS en Supabase para las tablas sensibles. La `service role` solo en el backend.
-- Hash de `reporter_wa_id` y cifrado del contacto.
+- Hash SHA-256 de `reporter_wa_id` y cifrado del contacto.
 - Fotos crudas en storage temporal con expiración. Conservar solo embeddings.
-- Rate limit en el webhook y en la consola.
+- Rate limit en el webhook (`slowapi`) y en la consola.
 
 ---
 
 ## 11. Variables de entorno
 
+El archivo canónico es `modulos/migration_prox/.env.example`. Las variables activas hoy:
+
 ```env
-WHATSAPP_TOKEN=
-WHATSAPP_PHONE_NUMBER_ID=
-WHATSAPP_VERIFY_TOKEN=
-WHATSAPP_APP_SECRET=
-WABA_ID=
+# Base de datos
+DATABASE_URL=sqlite:///./test.db          # dev; cambiar a postgresql+psycopg2://... en prod
 
-COMPREFACE_URL=
-COMPREFACE_API_KEY=
+# WAHA — WhatsApp HTTP API
+WAHA_URL=http://localhost:3000
+WAHA_SESSION=default
+WAHA_API_KEY=                             # Si activas auth en WAHA
+WAHA_WEBHOOK_URL=http://localhost:8000/webhook/waha
+WAHA_FREE_TIER=true
+WAHA_WEBHOOK_SECRET=                      # Opcional: valida X-WAHA-Token en el webhook
 
-SUPABASE_URL=
-SUPABASE_SERVICE_KEY=
+# Bot
+ENVIRONMENT=development                   # production desactiva /docs y /redoc
+PHOTO_MAX_COUNT=5
+PHOTO_TTL_SECONDS=60
+PHOTO_STORAGE_PATH=media/photos
 
-EMBEDDINGS_API_KEY=
-
-FACE_MATCH_THRESHOLD=
-COMBINED_MATCH_THRESHOLD=
-PHOTO_RETENTION_DAYS=
+# DeepSeek — deshabilitado, no configurar hasta nueva instrucción
+DEEPSEEK_API_KEY=
 ```
+
+Variables pendientes (módulos aún no implementados): `COMPREFACE_URL`, `COMPREFACE_API_KEY`, `EMBEDDINGS_API_KEY`, `FACE_MATCH_THRESHOLD`, `COMBINED_MATCH_THRESHOLD`.
 
 ---
 
 ## 12. Orden de build
 
-1. Schema, extensiones y RLS.
-2. Deploy de CompreFace y smoke test: `detect` devuelve embedding.
-3. Webhook de WhatsApp: verify, recepción y descarga de media.
-4. Flujos de intake (missing y found) con Flows y manejo de sesión.
-5. Embeddings de texto y de cara, con gate de calidad.
-6. Motor de match: cara 1:N, texto, fusión, escritura en `matches`, dedup.
-7. Consola de revisión en Lovable: confirmar, descartar, audit.
-8. Submit de la plantilla Utility y notificación al confirmar.
-9. Hardening: firma, rate limit, job de retención, verificación de RLS.
+1. ✅ Schema SQLAlchemy (reports, photos, matches, audit_log) + modelos Operacion/BotConfig/Flow.
+2. ✅ Deploy de WAHA en Docker y auto-configuración de sesión al arrancar.
+3. ✅ Webhook WAHA: recepción de texto e imagen, resolución de operación/sesión, deduplicación de eventos.
+4. ✅ Flujos de intake conversacionales (familiar, rescatista, hospital) con TTL de fotos.
+5. ⬜ Deploy de CompreFace y smoke test: `detect` devuelve embedding de 512 dim.
+6. ⬜ Embeddings de texto y de cara con gate de calidad fotográfica.
+7. ⬜ Motor de match: cara 1:N, texto, fusión, escritura en `matches`, dedup.
+8. ⬜ Consola de revisión: confirmar, descartar, audit_log.
+9. ⬜ Notificación al confirmar vía WAHA `send_message`.
+10. ⬜ Hardening: token webhook, rate limit, job de retención de fotos.
 
 ---
 
@@ -256,9 +266,9 @@ PHOTO_RETENTION_DAYS=
 - [ ] Un reporte de desaparecido y uno de encontrado de la misma persona producen un match pendiente con score visible.
 - [ ] Personas distintas no producen match por encima del umbral (probado con pares).
 - [ ] El bot nunca envía estado ni confirma sin acción humana.
-- [ ] El webhook valida firma. Endpoints sin auth: cero.
+- [ ] El webhook valida el token WAHA. Endpoints sin auth: cero.
 - [ ] Las fotos crudas expiran. Los embeddings persisten.
-- [ ] La plantilla Utility está aprobada y la notificación se entrega en prueba.
+- [ ] La notificación de match se entrega correctamente al número de la familia vía WAHA.
 - [ ] Dos reportes de la misma persona se detectan como duplicados.
 
 ---
@@ -275,10 +285,95 @@ PHOTO_RETENTION_DAYS=
 
 ---
 
-## 15. Arranque con Claude Code
+## 15. Arranque rápido con Docker
 
-**Primer objetivo:** secciones 6 y 9 (schema + CompreFace) y luego 7.1 (webhook).
+El módulo de WhatsApp (`modulos/migration_prox`) incluye un `docker-compose.yml` que levanta el sistema completo en dos comandos.
 
-**Prompt inicial sugerido:**
+### Requisitos
 
-> Lee este PRD. Implementa el milestone 1 y 2: el schema SQL de la sección 6 como migración de Supabase, y el docker-compose de CompreFace de la sección 9 con `ANONYMIZE_DATA=true` e IP whitelist. No agregues nada fuera del alcance. Código conciso, sin comentarios. Al terminar, dame el smoke test que confirma que CompreFace detecta una cara y devuelve un embedding de 512 dim.
+- Docker Desktop (Windows/Mac) o Docker Engine + Compose plugin (Linux)
+- Puerto 3000 (WAHA) y 8000 (bot) libres
+
+### Levantar
+
+```bash
+cd modulos/migration_prox
+
+# Solo la primera vez:
+cp .env.example .env
+# En desarrollo no hace falta editar nada
+
+docker compose up --build
+```
+
+Al arrancar verás:
+```
+reune_bot   | FlowSeeder: flujo por defecto verificado/creado.
+reune_bot   | Operacion 'reune' creada (id=1).
+reune_bot   | WAHA session 'default' created with webhook http://bot:8000/webhook/waha.
+reune_waha  | Session 'default' is ready!
+reune_bot   | Application startup complete.
+```
+
+### Conectar WhatsApp
+
+1. Abre `http://localhost:3000/dashboard` en el navegador
+2. La sesión `default` ya existe (el bot la crea al arrancar) — haz clic en **Start session**
+3. Escanea el QR con la app de WhatsApp del número que usarás como bot
+4. Cuando el estado cambie a `WORKING`, el sistema está listo para recibir mensajes
+
+> La URL del webhook (`http://bot:8000/webhook/waha`) se configura automáticamente en la sesión. No hace falta ajustarla en el dashboard.
+
+### Probar
+
+```bash
+# Simula un mensaje entrante de WAHA
+curl -s -X POST http://localhost:8000/webhook/waha \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session": "default",
+    "event": "message",
+    "id": "test-event-001",
+    "payload": {
+      "from": "584121234567@c.us",
+      "fromMe": false,
+      "body": "hola",
+      "hasMedia": false
+    }
+  }'
+# Esperado: {"status":"processed","sent":true}
+# El número recibirá el mensaje de bienvenida de Reúne por WhatsApp.
+```
+
+### Variables de entorno relevantes para producción
+
+| Variable | Para qué |
+|---|---|
+| `DATABASE_URL` | Cambiar a `postgresql+psycopg2://...` |
+| `WAHA_API_KEY` | Si activas auth en WAHA |
+| `WAHA_WEBHOOK_SECRET` | Valida `X-WAHA-Token` en el webhook |
+| `WAHA_WEBHOOK_URL` | URL pública del bot (ngrok, dominio, IP pública) |
+| `ENVIRONMENT=production` | Desactiva `/docs` y `/redoc` |
+
+### Detener y limpiar
+
+```bash
+docker compose down          # detiene contenedores
+docker compose down -v       # detiene + borra volúmenes (borra DB y sesión WA)
+```
+
+---
+
+## 16. Estado actual del módulo WhatsApp
+
+El módulo `modulos/migration_prox` está operativo. El sistema:
+
+- Recibe mensajes de WhatsApp vía WAHA y los procesa sin LLM (navegación por `next_node_map`).
+- Guía al usuario por un flujo conversacional: identifica si es familiar de un desaparecido, rescatista u hospital.
+- Recopila datos del reporte (nombre, género, edad, ubicación) en un solo mensaje de texto.
+- Acepta fotos con TTL: se agrupan hasta 5 por conversación y se vinculan al reporte al cerrarse.
+- Persiste reportes y fotos en SQLite (desarrollo) con modelos `Report`, `Photo`, `Operacion`, `Conversacion`.
+- Auto-configura la sesión WAHA y el webhook al arrancar.
+- Deduplica eventos WAHA por `event.id` para evitar respuestas dobles.
+
+**Próximo paso:** integrar CompreFace (§12, paso 5) para gate de calidad de foto y embedding facial.
