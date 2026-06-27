@@ -54,6 +54,7 @@ def commit_report(
     conversation,
     client_phone: str,
     notes: Optional[str] = None,
+    kind: str = "missing",
 ) -> Optional[Report]:
     """
     Crea Report + Photo(s) a partir del contexto de la conversación.
@@ -77,7 +78,7 @@ def commit_report(
     parsed = parse_person_data(person_raw) if person_raw else {}
 
     report = Report(
-        kind="missing",
+        kind=kind,
         full_name=parsed.get("full_name"),
         gender=parsed.get("gender"),
         age=parsed.get("age"),

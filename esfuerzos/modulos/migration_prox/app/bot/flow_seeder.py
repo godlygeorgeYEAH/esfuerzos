@@ -122,28 +122,46 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 6. Guía rescatista — placeholder
+    # 6. Guía rescatista — intake permisivo: imagen y/o texto, TTL 60 s
     # ------------------------------------------------------------------
     {
         "node_key": "guia_rescatista",
-        "node_type": "placeholder",
+        "node_type": "rescatista_intake",
         "order_position": 6,
         "message_template": (
-            "Gracias por tu apoyo 🙏\n\n"
-            "El flujo para rescatistas estará disponible muy pronto.\n"
-            "Un coordinador se pondrá en contacto contigo."
+            "Gracias por comunicarte, rescatista. 🙏\n\n"
+            "Puedes enviar una *foto* de la persona encontrada, una descripción en texto, o ambas.\n\n"
+            "Escribe *listo* cuando termines, o *reporte* para iniciar un nuevo caso."
         ),
         "expected_responses": None,
         "next_node_map": None,
     },
 
     # ------------------------------------------------------------------
-    # 7. Guía hospital — placeholder
+    # 7. Rescatista guardado — confirmación
+    # ------------------------------------------------------------------
+    {
+        "node_key": "rescatista_guardado",
+        "node_type": "rescatista_saved",
+        "order_position": 7,
+        "message_template": (
+            "✅ *Caso registrado.*\n\n"
+            "Nuestro equipo lo revisará. Escribe *reporte* para registrar otro caso."
+        ),
+        "expected_responses": None,
+        "next_node_map": json.dumps({
+            "reporte": "guia_rescatista",
+            "default": "guia_rescatista",
+        }),
+    },
+
+    # ------------------------------------------------------------------
+    # 8. Guía hospital — placeholder
     # ------------------------------------------------------------------
     {
         "node_key": "guia_hospital",
         "node_type": "placeholder",
-        "order_position": 7,
+        "order_position": 8,
         "message_template": (
             "Gracias por contactarnos 🏥\n\n"
             "El flujo para hospitales y refugios estará disponible muy pronto.\n"
@@ -154,12 +172,12 @@ DEFAULT_NODES = [
     },
 
     # ------------------------------------------------------------------
-    # 8. Fallback — no entendió; retoma con 1/2/3
+    # 9. Fallback — no entendió; retoma con 1/2/3
     # ------------------------------------------------------------------
     {
         "node_key": "fallback",
         "node_type": "fallback",
-        "order_position": 8,
+        "order_position": 9,
         "message_template": (
             "No entendí tu mensaje.\n\n"
             "Escribe el número de tu perfil:\n"

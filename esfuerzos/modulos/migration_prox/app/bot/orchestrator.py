@@ -154,7 +154,13 @@ class Orchestrator:
              node_key=current_node.node_key,
              expected_responses=current_node.expected_responses or "ninguna")
 
-        # --- Paso 6c: Nodo pedir_foto — TTL + descarga de fotos ---
+        # --- Paso 6c: Nodo guia_rescatista — imagen y/o texto, TTL 60 s ---
+        if current_node and current_node.node_key == "guia_rescatista":
+            return await self._handle_rescatista_intake(
+                conversation, operacion_id, message_text, media_url
+            )
+
+        # --- Paso 6d: Nodo pedir_foto — TTL + descarga de fotos ---
         if current_node and current_node.node_key == "pedir_foto":
             return await self._handle_pedir_foto(
                 conversation, operacion_id, message_text, media_url
@@ -405,6 +411,114 @@ class Orchestrator:
         dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
              fotos=photo_count, motivo=motivo)
         self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    # ------------------------------------------------------------------
+    # Rescatista — imagen y/o texto, TTL 60 s
+    # ------------------------------------------------------------------
+
+    async def _handle_rescatista_intake(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        message_text: str,
+        media_url: Optional[str],
+    ) -> Tuple[str, bool]:
+        context = self.context_manager.get(conversation)
+        pending_photos: list = context.get("pending_photos", [])
+        last_photo_at_str: Optional[str] = context.get("last_photo_at")
+
+        if media_url:
+            local_path = await self._download_photo(media_url, conversation.id, len(pending_photos))
+            pending_photos.append({
+                "media_url": media_url,
+                "local_path": local_path,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            context["pending_photos"] = pending_photos
+            context["last_photo_at"] = datetime.utcnow().isoformat()
+            conversation.context = json.dumps(context)
+
+            count = len(pending_photos)
+            logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
+            response = (
+                f"📸 Imagen recibida ({count}).\n\n"
+                "Puedes enviar más fotos o agregar una descripción en texto.\n"
+                "Escribe *listo* cuando termines."
+            )
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # — Texto —
+        text = (message_text or "").strip().lower()
+
+        # TTL: si hay fotos y pasaron 60 s desde la última → auto-commit
+        if pending_photos and last_photo_at_str:
+            try:
+                last_photo_at = datetime.fromisoformat(last_photo_at_str)
+                elapsed = (datetime.utcnow() - last_photo_at).total_seconds()
+                if elapsed >= 60:
+                    logger.info("[BOT] phone=%s guia_rescatista → TTL expirado (%.0fs)", conversation.client_phone, elapsed)
+                    return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "ttl_expired")
+            except Exception:
+                pass
+
+        if text == "listo":
+            logger.info("[BOT] phone=%s guia_rescatista → listo", conversation.client_phone)
+            return self._advance_rescatista(conversation, operacion_id, context, len(pending_photos), "listo")
+
+        if text == "reporte":
+            context.pop("pending_photos", None)
+            context.pop("last_photo_at", None)
+            context.pop("intake_person_raw", None)
+            conversation.context = json.dumps(context)
+            guia_node = self.engine._get_node_by_key(operacion_id, "guia_rescatista")
+            response = self.engine._generate_response(guia_node, operacion_id, conversation) if guia_node else "Puedes enviar una nueva foto o descripción."
+            logger.info("[BOT] phone=%s guia_rescatista → reporte (reinicio)", conversation.client_phone)
+            self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+            return response, True
+
+        # Texto libre
+        context["intake_person_raw"] = message_text
+        conversation.context = json.dumps(context)
+
+        if not pending_photos:
+            response = (
+                "📝 Descripción recibida.\n\n"
+                "Si tienes una foto, envíala ahora.\n"
+                "Escribe *listo* para registrar sin foto, o *reporte* para iniciar otro caso."
+            )
+        else:
+            response = (
+                f"📝 Descripción guardada. Tienes {len(pending_photos)} foto(s).\n"
+                "Escribe *listo* para finalizar o envía más fotos."
+            )
+
+        logger.info("[BOT] phone=%s guia_rescatista → texto libre (fotos=%d)", conversation.client_phone, len(pending_photos))
+        self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
+        return response, True
+
+    def _advance_rescatista(
+        self,
+        conversation: Conversacion,
+        operacion_id: int,
+        context: dict,
+        photo_count: int,
+        motivo: str,
+    ) -> Tuple[str, bool]:
+        from app.core.intake import commit_report
+        _report = commit_report(self.db, conversation, conversation.client_phone, kind="found")
+        if _report:
+            dlog("ORCHESTRATOR", "Rescatista: report creado", report_id=_report.id, fotos=photo_count, motivo=motivo)
+
+        guardado_node = self.engine._get_node_by_key(operacion_id, "rescatista_guardado")
+        if guardado_node:
+            response = self.engine._generate_response(guardado_node, operacion_id, conversation)
+        else:
+            response = "✅ Caso registrado. Escribe *reporte* para registrar otro."
+
+        conversation.current_node_key = "rescatista_guardado"
+        self._save_bot_message(conversation, response, "rescatista_guardado", ai_generated=False, ai_confidence=None)
         return response, True
 
     async def _download_photo(
