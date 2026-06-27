@@ -167,9 +167,10 @@ DEFAULT_NODES = [
         "node_type": "hospital_location",
         "order_position": 8,
         "message_template": (
-            "Bienvenidos 🏥\n\n"
-            "Para registrar su hospital o refugio, envíennos su nombre y ubicación.\n\n"
-            "Pueden escribirlo o compartir su ubicación por WhatsApp."
+            "Bienvenidos 🏥\n\n\n"
+            "Para registrar su hospital o refugio necesitamos tu ubicación. "
+            "Puedes escribirla o compartir tu ubicación en GPS.\n\n\n"
+            "Mándame un texto con tu dirección o comparte tu posición de GPS."
         ),
         "expected_responses": None,
         "next_node_map": None,
