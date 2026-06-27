@@ -109,12 +109,7 @@ DEFAULT_NODES = [
         "message_template": (
             "✅ *Reporte registrado.*\n\n"
             "Si encontramos una coincidencia en nuestra base de datos, "
-            "te lo haremos saber de inmediato.\n\n"
-            "¿Qué deseas hacer ahora?\n"
-            "*1* — Reportar otro desaparecido\n"
-            "*2* — Reporte de rescatista\n"
-            "*3* — Ingresos de Pacientes Hospitalarios\n\n"
-            "O escribe *inicio* para volver al menú principal."
+            "te lo haremos saber de inmediato."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
@@ -156,12 +151,7 @@ DEFAULT_NODES = [
         "message_template": (
             "✅ *Caso registrado.*\n\n"
             "Compararemos los datos que nos ofreciste con los reportes de desaparecidos "
-            "y te notificamos si encontramos coincidencias.\n\n"
-            "¿Qué deseas hacer ahora?\n"
-            "*reporte* — Registrar otro caso\n"
-            "*1* — Reportar desaparecido\n"
-            "*3* — Ingresos de Pacientes Hospitalarios\n\n"
-            "O escribe *inicio* para volver al menú principal."
+            "y te notificamos si encontramos coincidencias."
         ),
         "expected_responses": None,
         "next_node_map": json.dumps({
