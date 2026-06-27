@@ -436,20 +436,47 @@ class Orchestrator:
         message_text: str,
         media_url: Optional[str],
     ) -> Tuple[str, bool]:
+        import re
+        from app.models.hospital import Hospital
+
         if not message_text:
             response = "Por favor envíen el nombre y ubicación de su hospital o refugio, o compartan su ubicación por WhatsApp."
             self._save_bot_message(conversation, response, "guia_hospital", ai_generated=False, ai_confidence=None)
             return response, True
 
-        context = self.context_manager.get(conversation)
-        context["hospital_location"] = message_text
-        conversation.context = json.dumps(context)
-        conversation.current_node_key = "hospital_registrado"
+        # Extraer lat/lng si viene de GPS
+        lat, lng, nombre = None, None, None
+        gps_match = re.search(r'GPS:\s*([-\d.]+),\s*([-\d.]+)', message_text)
+        if gps_match:
+            lat = float(gps_match.group(1))
+            lng = float(gps_match.group(2))
+            nombre = message_text.split(" (GPS:")[0].strip() or None
+        else:
+            nombre = message_text.strip()
 
+        # Upsert Hospital
+        hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == conversation.waha_chat_id).first()
+        if hospital:
+            hospital.nombre = nombre
+            hospital.ubicacion_texto = message_text
+            hospital.lat = lat
+            hospital.lng = lng
+        else:
+            hospital = Hospital(
+                wa_chat_id=conversation.waha_chat_id or conversation.client_phone,
+                nombre=nombre,
+                ubicacion_texto=message_text,
+                lat=lat,
+                lng=lng,
+            )
+            self.db.add(hospital)
+        self.db.commit()
+
+        conversation.current_node_key = "hospital_registrado"
         registrado_node = self.engine._get_node_by_key(operacion_id, "hospital_registrado")
         response = self.engine._generate_response(registrado_node, operacion_id, conversation) if registrado_node else "✅ Registro completado. Esperamos sus listas de ingresos. 🙏"
 
-        logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (ubicacion=%s)", conversation.client_phone, message_text[:60])
+        logger.info("[BOT] phone=%s guia_hospital → hospital_registrado (nombre=%s lat=%s lng=%s)", conversation.client_phone, nombre, lat, lng)
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
 
@@ -460,24 +487,29 @@ class Orchestrator:
         message_text: str,
         media_url: Optional[str],
     ) -> Tuple[str, bool]:
+        from app.models.hospital import Hospital, HospitalLista
+
         if media_url:
-            local_path = await self._download_photo(media_url, conversation.id, 0)
-            context = self.context_manager.get(conversation)
-            listas: list = context.get("hospital_listas", [])
-            listas.append({
-                "media_url": media_url,
-                "local_path": local_path,
-                "received_at": datetime.utcnow().isoformat(),
-            })
-            context["hospital_listas"] = listas
-            conversation.context = json.dumps(context)
-            logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, len(listas))
-            response = f"📋 Lista recibida ({len(listas)}). Puede continuar enviando más. Muchas gracias. 🙏"
+            hospital = self.db.query(Hospital).filter(Hospital.wa_chat_id == (conversation.waha_chat_id or conversation.client_phone)).first()
+            lista_count = len(hospital.listas) if hospital else 0
+
+            local_path = await self._download_photo(media_url, conversation.id, lista_count)
+
+            if hospital:
+                self.db.add(HospitalLista(
+                    hospital_id=hospital.id,
+                    media_url=media_url,
+                    local_path=local_path,
+                ))
+                self.db.commit()
+                lista_count += 1
+
+            logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
+            response = f"📋 Lista recibida ({lista_count}). Puede continuar enviando más. Muchas gracias. 🙏"
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
-        # Texto — acusar recibo sin avanzar
-        logger.info("[BOT] phone=%s hospital_registrado → texto ignorado", conversation.client_phone)
+        logger.info("[BOT] phone=%s hospital_registrado → texto", conversation.client_phone)
         response = "Recibido. Cuando tengan listas de ingresos, envíen las fotos y las procesaremos. 🙏"
         self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
         return response, True
