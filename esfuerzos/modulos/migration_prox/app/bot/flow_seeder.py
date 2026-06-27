@@ -186,7 +186,7 @@ DEFAULT_NODES = [
             "✅ *Registro completado.*\n\n"
             "Muchas gracias por sumarse. Para no interrumpir su flujo de trabajo, "
             "lo único que les pedimos es que nos envíen fotos de sus listas de ingresos "
-            "cuando puedan.\n\n"
+            "— los registros de personas admitidas en su institución — cuando puedan.\n\n"
             "Nuestro equipo las procesará internamente. Su aporte es invaluable. 🙏"
         ),
         "expected_responses": None,
