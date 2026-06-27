@@ -437,15 +437,29 @@ class Orchestrator:
             })
             context["pending_photos"] = pending_photos
             context["last_photo_at"] = datetime.utcnow().isoformat()
-            conversation.context = json.dumps(context)
 
+            caption = (message_text or "").strip()
+            if caption:
+                existing = context.get("intake_person_raw", "")
+                context["intake_person_raw"] = (existing + "\n" + caption).strip() if existing else caption
+
+            conversation.context = json.dumps(context)
             count = len(pending_photos)
-            logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
-            response = (
-                f"📸 Imagen recibida ({count}).\n\n"
-                "Puedes enviar más fotos o agregar una descripción en texto.\n"
-                "Escribe *listo* cuando termines."
-            )
+
+            if caption:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen+caption recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Tomé el caption de tu imagen ({count} foto(s)).\n\n"
+                    "Puedes agregar más texto o enviar más fotos.\n"
+                    "Escribe *listo* para terminar este reporte."
+                )
+            else:
+                logger.info("[BOT] phone=%s guia_rescatista → imagen recibida (%d)", conversation.client_phone, count)
+                response = (
+                    f"📸 Imagen recibida ({count}).\n\n"
+                    "Puedes enviar más fotos o agregar una descripción en texto.\n"
+                    "Escribe *listo* cuando termines."
+                )
             self._save_bot_message(conversation, response, "guia_rescatista", ai_generated=False, ai_confidence=None)
             return response, True
 

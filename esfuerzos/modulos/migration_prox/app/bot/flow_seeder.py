@@ -130,8 +130,12 @@ DEFAULT_NODES = [
         "order_position": 6,
         "message_template": (
             "Gracias por comunicarte, rescatista. 🙏\n\n"
-            "Puedes enviar una *foto* de la persona encontrada, una descripción en texto, o ambas.\n\n"
-            "Escribe *listo* cuando termines, o *reporte* para iniciar un nuevo caso."
+            "Lo que más ayuda a la familia:\n\n"
+            "📸 Una foto si puedes\n"
+            "📍 Dónde está exactamente (refugio, hospital, dirección)\n"
+            "❤️ Cómo está (consciente, herida, estable)\n"
+            "🪪 Su nombre, si puede decírtelo\n\n"
+            "Escribe *listo* cuando termines."
         ),
         "expected_responses": None,
         "next_node_map": None,
