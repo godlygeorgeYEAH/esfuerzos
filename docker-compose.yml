@@ -17,8 +17,16 @@ services:
       - /root/reconexion_images:/root/reconexion_images:ro
       - /root/venezreporta_images:/root/venezreporta_images:ro
       - app_data:/app/data
+    networks:
+      - default
+      - reune_waha
 
 volumes:
   insightface_cache:
   huggingface_cache:
   app_data:
+
+networks:
+  reune_waha:
+    external: true
+    name: reune_default
