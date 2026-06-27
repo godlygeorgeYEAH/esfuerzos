@@ -34,7 +34,7 @@ services:
   # WAHA — WhatsApp HTTP API (free tier, una sesión)
   # ----------------------------------------------------------------
   waha:
-    image: devlikeapro/waha-plus
+    image: devlikeapro/waha
     container_name: reune_waha
     restart: unless-stopped
     ports:

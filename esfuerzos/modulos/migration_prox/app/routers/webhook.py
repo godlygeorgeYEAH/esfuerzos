@@ -198,16 +198,20 @@ async def waha_webhook(request: Request, db: Session = Depends(get_db)):
 
     sent = False
     if should_send:
+        from app.services.waha import send_list as waha_send_list, send_message as waha_send
         list_payload = orchestrator._pending_list
+        pre_text = orchestrator._pre_list_message
+
         if list_payload:
-            from app.services.waha import send_list as waha_send_list, send_message as waha_send
+            # Texto informativo previo (solo flujo hospital) — se envía antes del menú
+            if pre_text:
+                await waha_send(phone=chat_id, message=pre_text, session=session_name)
             sent = await waha_send_list(chat_id=chat_id, session=session_name, message=list_payload)
-            if not sent and response:
-                # fallback a texto plano si sendList falla
+            if not sent and response and not pre_text:
+                # fallback a texto plano si sendList falla y no se envió el pre_text ya
                 sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
             logger.info("WAHA sendList → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
         elif response:
-            from app.services.waha import send_message as waha_send
             sent = bool(await waha_send(phone=chat_id, message=response, session=session_name))
             logger.info("WAHA sendText → chat_id=%s session=%s result=%s", chat_id, session_name, sent)
         else:
