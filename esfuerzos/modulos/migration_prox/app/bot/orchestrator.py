@@ -519,7 +519,7 @@ class Orchestrator:
             self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
-            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏\n\nEscribe *cambiar* si necesitas reportar otra institución."
+            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏\n\nEscribe *cambiar* para reportar otra institución o *inicio* para volver al menú principal."
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)
             return response, True
 
