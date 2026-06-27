@@ -63,7 +63,7 @@ _LIST_BIENVENIDA = {
 
 _LIST_REPORTE_GUARDADO = {
     "title": "✅ Reporte registrado",
-    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
+    "description": "¿Qué deseas hacer ahora?",
     "footer": "No confirmamos coincidencias sin verificación humana previa.",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
@@ -76,8 +76,8 @@ _LIST_REPORTE_GUARDADO = {
 
 _LIST_RESCATISTA_GUARDADO = {
     "title": "✅ Caso registrado",
-    "description": "Nuestro equipo lo revisará. ¿Qué deseas hacer ahora?",
-    "footer": "",
+    "description": "¿Qué deseas hacer ahora?",
+    "footer": "Compararemos tus datos con los reportes de desaparecidos.",
     "button": "Opciones",
     "sections": [{"title": "Continuar", "rows": [
         {"title": "Registrar otro caso",                 "rowId": "reporte", "description": None},
@@ -213,6 +213,11 @@ class Orchestrator:
         # --- Escape global: "inicio" reinicia desde cualquier nodo ---
         if (message_text or "").strip().lower() == "inicio":
             prev_node = conversation.current_node_key or "?"
+            if prev_node == "notas_adicionales":
+                from app.core.intake import commit_report
+                _report = commit_report(self.db, conversation, client_phone, notes="")
+                if _report:
+                    dlog("ORCHESTRATOR", "Intake: report creado (escape inicio desde notas)", report_id=_report.id)
             context = self.context_manager.get(conversation)
             context.clear()
             conversation.context = json.dumps(context)
@@ -378,6 +383,11 @@ class Orchestrator:
             _report = commit_report(self.db, conversation, client_phone, notes=message_text)
             if _report:
                 dlog("ORCHESTRATOR", "Intake: report creado", report_id=_report.id)
+        elif current_node.node_key == "notas_adicionales":
+            from app.core.intake import commit_report
+            _report = commit_report(self.db, conversation, client_phone, notes="")
+            if _report:
+                dlog("ORCHESTRATOR", "Intake: report creado (ruptura de flujo, sin notas)", report_id=_report.id)
 
         # --- Paso 10: Context Manager ---
         conversation.current_node_key = next_node.node_key
@@ -423,8 +433,7 @@ class Orchestrator:
         }
         if next_node.node_key in _list_map:
             self._pending_list = _list_map[next_node.node_key]
-            # Nodos que envían el texto informativo separado del menú de navegación
-            if next_node.node_key in {"notas_adicionales"}:
+            if next_node.node_key in {"notas_adicionales", "reporte_guardado", "rescatista_guardado"}:
                 self._pre_list_message = response
 
         if next_node.node_key == "escalado_humano":
@@ -524,6 +533,8 @@ class Orchestrator:
                 "O escribe *reporte* para registrar un nuevo caso."
             )
         conversation.current_node_key = "notas_adicionales"
+        self._pre_list_message = response
+        self._pending_list = _LIST_NOTAS_ADICIONALES
         dlog("ORCHESTRATOR", "Avance automático desde pedir_foto",
              fotos=photo_count, motivo=motivo)
         self._save_bot_message(conversation, response, "notas_adicionales", ai_generated=False, ai_confidence=None)
@@ -612,7 +623,11 @@ class Orchestrator:
             self.db.commit()
 
             logger.info("[BOT] phone=%s hospital_registrado → lista recibida (%d)", conversation.client_phone, lista_count)
-            response = f"📋 Lista recibida ({lista_count}). Puedes seguir enviando más. Muchas gracias. 🙏"
+            response = (
+                f"📋 Lista recibida ({lista_count}). Muchas gracias. 🙏\n\n"
+                "Tus datos serán comparados con los reportes de desaparecidos. "
+                "Puedes seguir enviando más fotos."
+            )
             self._pre_list_message = response
             self._pending_list = _hospital_nav_list()
             self._save_bot_message(conversation, response, "hospital_registrado", ai_generated=False, ai_confidence=None)

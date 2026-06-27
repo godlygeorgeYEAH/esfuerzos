@@ -108,8 +108,8 @@ DEFAULT_NODES = [
         "order_position": 5,
         "message_template": (
             "✅ *Reporte registrado.*\n\n"
-            "Nuestro equipo lo revisará. No confirmaremos coincidencias "
-            "sin verificación humana previa.\n\n"
+            "Si encontramos una coincidencia en nuestra base de datos, "
+            "te lo haremos saber de inmediato.\n\n"
             "¿Qué deseas hacer ahora?\n"
             "*1* — Reportar otro desaparecido\n"
             "*2* — Reporte de rescatista\n"
@@ -155,7 +155,8 @@ DEFAULT_NODES = [
         "order_position": 7,
         "message_template": (
             "✅ *Caso registrado.*\n\n"
-            "Nuestro equipo lo revisará.\n\n"
+            "Compararemos los datos que nos ofreciste con los reportes de desaparecidos "
+            "y te notificamos si encontramos coincidencias.\n\n"
             "¿Qué deseas hacer ahora?\n"
             "*reporte* — Registrar otro caso\n"
             "*1* — Reportar desaparecido\n"
