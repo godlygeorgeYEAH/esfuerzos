@@ -347,13 +347,17 @@ async def _handle_message(payload: dict, app: Any) -> None:
                 await _waha_send(phone, reply)
             candidates = await _search_existing_matches(name, kind)
             if candidates:
-                # Deduplicate by normalized name (same person appears in multiple scrapers)
-                seen_names: set = set()
+                # Deduplicate: same person entered with different name variants at same location
+                seen_keys: set = set()
                 unique = []
                 for m in candidates:
-                    norm = re.sub(r'\s+', ' ', (m.get('full_name') or '').lower().strip())
-                    if norm not in seen_names:
-                        seen_names.add(norm)
+                    name_tok = (m.get('full_name') or '').lower().split()
+                    # key = first name token + location (catches "Vergara Arantza" vs "Arantza Vergara" at same site)
+                    first_tok = name_tok[0] if name_tok else ""
+                    loc_tok = re.sub(r'\s+', '', (m.get('last_seen_location') or '').lower())
+                    dedup_key = f"{first_tok}|{loc_tok}"
+                    if dedup_key not in seen_keys:
+                        seen_keys.add(dedup_key)
                         unique.append(m)
                 lines = []
                 for m in unique[:3]:
