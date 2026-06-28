@@ -64,9 +64,9 @@ _conv_state: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
 # Running accumulated report fields per phone (so the LLM never re-asks).
 _collected: dict[str, dict] = defaultdict(dict)
 
-# Phones we have already sent a proactive (pre-report) match preview to.
-# Prevents spamming the same person on every turn before the form completes.
-_proactive_searched: set[str] = set()
+# Phones we have already shown DB match results to (search once per report, not
+# every turn). Cleared when the user starts reporting a different person.
+_searched_shown: set[str] = set()
 
 # Deduplication: msg_id -> timestamp. Clears entries older than 60s.
 _seen_msg_ids: dict[str, float] = {}
@@ -312,6 +312,12 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
 
     # Merge new non-null fields into the running state; downstream sees the union
     ext = result.get("extracted") or {}
+    # New-person detection: if the user names a clearly different person, start fresh
+    new_name = (ext.get("name") or "").strip()
+    cur_name = (_collected[phone].get("name") or "").strip()
+    if new_name and cur_name and _name_score(new_name, cur_name) < 0.4:
+        _collected[phone].clear()
+        _searched_shown.discard(phone)
     for k, v in ext.items():
         if k != "report_ready" and v not in (None, ""):
             _collected[phone][k] = v
@@ -613,71 +619,52 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if reply:
         _conv_state[phone].append({"role": "assistant", "content": reply})
 
-    # Persist report when enough data collected
-    if extracted.get("report_ready") and extracted.get("name"):
+    name = (extracted.get("name") or "").strip()
+    kind = extracted.get("kind") or "missing"
+
+    # Register / update the report as soon as we have name + kind. Idempotent
+    # (same conv_key), so refining details across turns updates the same row —
+    # no mid-conversation reset that fragments the flow.
+    report_id = None
+    if name and extracted.get("kind"):
         conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
         report_id = await _upsert_report(phone, extracted, conv_key)
-        kind = extracted.get("kind") or "missing"
-        name = extracted.get("name", "")
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
-            # Register phone↔report so a background match found later can notify them
             await _register_subscriber(report_id, phone, extracted)
-            report_for_embed = {
+            asyncio.create_task(embed_and_match_report(report_id, {
                 "full_name": name,
                 "age": extracted.get("age"),
                 "last_seen_location": extracted.get("location"),
                 "distinguishing_marks": extracted.get("description"),
                 "kind": kind,
-            }
-            asyncio.create_task(embed_and_match_report(report_id, report_for_embed, app))
+            }, app))
 
-            # Send the LLM confirmation, then the live DB search result
-            if reply:
-                await _waha_send(phone, reply)
-            candidates = await _search_existing_matches(name, kind, exclude_id=report_id)
-            ranked = _rank_candidates(name, extracted.get("age"), candidates, extracted.get("location"))
-            unique = _dedup_candidates(ranked, limit=3)
-            if unique:
-                match_text = (
-                    "Busqué en nuestra base y hay posibles coincidencias:\n"
-                    + "\n".join(_format_match_line(m) for m in unique)
-                    + "\nSon preliminares — el equipo Reúne VE los verificará."
-                )
-                await _waha_send(phone, match_text)
-            else:
-                await _waha_send(
-                    phone,
-                    "Busqué en nuestra base ahora mismo y no hay coincidencias aún. "
-                    "Tu reporte queda activo — seguimos buscando y te avisamos si algo aparece."
-                )
-            # Reset conversation so the next message starts a fresh report
-            _conv_state.pop(phone, None)
-            _collected.pop(phone, None)
-            _proactive_searched.discard(phone)
-            return
-        else:
-            logger.error("Failed to upsert report for phone %s", phone)
-
-    # Proactive search: a name was detected but the report isn't complete yet.
-    # Fire once per phone so a panicked user gets an early preview without spam.
-    extracted_name = (extracted.get("name") or "").strip()
-    if extracted_name and len(extracted_name) >= 3 and phone not in _proactive_searched:
-        _proactive_searched.add(phone)  # mark before await so it can't double-fire
-        prov_kind = extracted.get("kind") or "missing"
-        prov_candidates = await _search_existing_matches(extracted_name, prov_kind)
-        prov_ranked = _rank_candidates(extracted_name, extracted.get("age"), prov_candidates, extracted.get("location"))
-        prov_unique = _dedup_candidates(prov_ranked, limit=3)
-        if prov_unique:
-            if reply:
-                await _waha_send(phone, reply)
+    # Search + show results ONCE per report, when there's enough to disambiguate
+    # (name + location or age). Avoids the premature "no coincidencias" dump on a
+    # bare name and the every-turn spam.
+    have_enough = bool(name) and bool(extracted.get("location") or extracted.get("age"))
+    if have_enough and phone not in _searched_shown:
+        _searched_shown.add(phone)
+        if reply:
+            await _waha_send(phone, reply)
+        candidates = await _search_existing_matches(name, kind, exclude_id=report_id)
+        ranked = _rank_candidates(name, extracted.get("age"), candidates, extracted.get("location"))
+        unique = _dedup_candidates(ranked, limit=3)
+        if unique:
             await _waha_send(
                 phone,
-                "Mientras registramos el reporte, encontré esto en nuestra base:\n"
-                + "\n".join(_format_match_line(m) for m in prov_unique)
-                + "\n¿Es alguna de estas personas?"
+                "Busqué en nuestra base y hay posibles coincidencias:\n"
+                + "\n".join(_format_match_line(m) for m in unique)
+                + "\nSon preliminares — el equipo Reúne VE los verificará."
             )
-            return
+        else:
+            await _waha_send(
+                phone,
+                "Busqué en nuestra base y no hay coincidencias claras aún. "
+                "Tu reporte queda activo — te avisamos si algo aparece."
+            )
+        return
 
     if reply:
         await _waha_send(phone, reply)
