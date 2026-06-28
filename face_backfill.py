@@ -35,6 +35,13 @@ _CURSOR_PATH = "/app/data/face_backfill_cursor.txt"
 _EPOCH = "1970-01-01T00:00:00+00:00"
 _BATCH = 60  # reports per run; InsightFace CPU ~1s each → ~1 min/run
 
+# Scrapers store the photo under different keys; some are relative paths that
+# need a per-source base URL to be downloadable.
+_PHOTO_KEYS = ("foto_url", "photoUrl", "photo_url", "foto", "image_url", "imageUrl")
+_PHOTO_BASE = {
+    "venezuela_te_busca": "https://venezuelatebusca.com",
+}
+
 
 def _read_cursor() -> str:
     try:
@@ -57,13 +64,22 @@ def _write_cursor(value: str) -> None:
         logger.warning("face_backfill: cursor write failed: %s", exc)
 
 
-def _foto_url(raw_data: Any) -> str | None:
+def _foto_url(raw_data: Any, source: str) -> str | None:
+    """Extract a downloadable photo URL from a report's raw_data, resolving
+    relative paths against the source's base URL."""
     if not isinstance(raw_data, dict):
         return None
-    for k in ("foto_url", "photo_url", "foto", "image_url"):
+    for k in _PHOTO_KEYS:
         v = raw_data.get(k)
-        if v and isinstance(v, str) and v.startswith("http"):
+        if not v or not isinstance(v, str):
+            continue
+        v = v.strip()
+        if v.startswith("http"):
             return v
+        if v.startswith("/"):
+            base = _PHOTO_BASE.get(source)
+            if base:
+                return base + v
     return None
 
 
@@ -81,8 +97,10 @@ async def run_face_backfill(app: Any) -> dict:
                 f"{sb}/rest/v1/reports",
                 headers=hdr,
                 params={
-                    "select": "id,kind,created_at,raw_data",
-                    "raw_data->>foto_url": "not.is.null",
+                    "select": "id,kind,source,created_at,raw_data",
+                    # any of the known photo keys present
+                    "or": "(raw_data->>foto_url.not.is.null,raw_data->>photoUrl.not.is.null,"
+                          "raw_data->>photo_url.not.is.null,raw_data->>imageUrl.not.is.null)",
                     "created_at": f"gt.{cursor}",
                     "order": "created_at.asc",
                     "limit": str(_BATCH),
@@ -107,7 +125,7 @@ async def run_face_backfill(app: Any) -> dict:
             for row in rows:
                 max_seen = max(max_seen, row["created_at"])
                 rid = row["id"]
-                foto = _foto_url(row.get("raw_data"))
+                foto = _foto_url(row.get("raw_data"), row.get("source", ""))
                 if not foto or rid in have_photo:
                     continue
                 processed += 1

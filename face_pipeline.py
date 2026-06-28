@@ -286,8 +286,7 @@ async def process_photo_for_report(
             logger.error("process_photo_for_report: report %s not found", report_id)
             return None
 
-        kind: str = rows[0].get("kind", "")
-        opposite_kind = "missing" if kind == "found" else "found"
+        source_kind: str = rows[0].get("kind", "") or "missing"
 
         # Persist embedding.
         try:
@@ -314,15 +313,24 @@ async def process_photo_for_report(
             )
             return None
 
-    return await _search_face_matches(
-        report_id, result["embedding"], opposite_kind, sb_url, sb_key
-    )
+    # Search BOTH kinds: the same face is worth surfacing whether the person is
+    # listed as missing (another searcher) or found (located). A missing↔missing
+    # hit connects two families looking for the same person.
+    first_match: str | None = None
+    for target_kind in ("missing", "found"):
+        mid = await _search_face_matches(
+            report_id, result["embedding"], target_kind, source_kind, sb_url, sb_key
+        )
+        if mid and not first_match:
+            first_match = mid
+    return first_match
 
 
 async def _search_face_matches(
     source_report_id: str,
     face_embedding: list,
     target_kind: str,
+    source_kind: str,
     sb_url: str,
     sb_key: str,
 ) -> str | None:
@@ -373,12 +381,15 @@ async def _search_face_matches(
                 continue
             combined_score = face_score
 
-            if target_kind == "missing":
-                missing_id = candidate_report_id
-                found_id = source_report_id
+            # Candidate is target_kind, source is source_kind. Put the missing-kind
+            # report in missing_id and the found-kind in found_id; if both are the
+            # same kind, label loosely (source first) — the columns are just a pair.
+            if target_kind == "missing" and source_kind == "found":
+                missing_id, found_id = candidate_report_id, source_report_id
+            elif target_kind == "found" and source_kind == "missing":
+                missing_id, found_id = source_report_id, candidate_report_id
             else:
-                found_id = candidate_report_id
-                missing_id = source_report_id
+                missing_id, found_id = source_report_id, candidate_report_id
 
             match_id = str(uuid.uuid4())
             row: dict = {

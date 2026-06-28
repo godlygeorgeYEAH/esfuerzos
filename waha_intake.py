@@ -36,6 +36,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
 from collections import defaultdict, deque
 from typing import Any
@@ -131,20 +132,30 @@ except ImportError:  # pragma: no cover
 _NAME_FLOOR = 0.60
 
 
+def _deaccent(s: str) -> str:
+    """Lowercase + strip accents so 'García' == 'Garcia' (essential for VE names)."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", s.lower())
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
 def _name_score(query: str, cand: str) -> float:
     """0..1 name similarity that requires real token overlap, not just one
-    shared given name. Blends bidirectional token overlap with token-sort ratio."""
-    qt = [t for t in query.lower().split() if len(t) >= 3]
-    ct = [t for t in cand.lower().split() if len(t) >= 3]
+    shared given name. Accent-insensitive. Blends bidirectional token overlap
+    with token-sort ratio."""
+    q = _deaccent(query)
+    c = _deaccent(cand)
+    qt = [t for t in q.split() if len(t) >= 3]
+    ct = [t for t in c.split() if len(t) >= 3]
     if not qt or not ct:
         return 0.0
     if not _HAS_FUZZ:
-        # Degraded: exact-token overlap fraction over the smaller name
         matched = sum(1 for t in qt if t in ct)
         return matched / min(len(qt), len(ct))
     matched = sum(1 for t in qt if any(_fuzz.ratio(t, u) >= 85 for u in ct))
-    overlap = matched / min(len(qt), len(ct))          # fraction of smaller name matched
-    tsr = _fuzz.token_sort_ratio(query, cand) / 100.0  # whole-string, order-insensitive
+    overlap = matched / min(len(qt), len(ct))      # fraction of smaller name matched
+    tsr = _fuzz.token_sort_ratio(q, c) / 100.0     # whole-string, order-insensitive
     return 0.6 * overlap + 0.4 * tsr
 
 
