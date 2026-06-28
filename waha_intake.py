@@ -35,6 +35,7 @@ import hmac
 import json
 import logging
 import re
+import time
 import uuid
 from collections import defaultdict, deque
 from typing import Any
@@ -52,6 +53,22 @@ settings = get_settings()
 
 # In-memory conversation state: phone -> deque of message dicts
 _conv_state: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
+
+# Deduplication: msg_id -> timestamp. Clears entries older than 60s.
+_seen_msg_ids: dict[str, float] = {}
+_DEDUP_TTL = 60.0
+
+
+def _is_duplicate(msg_id: str) -> bool:
+    now = time.monotonic()
+    # Purge old entries
+    expired = [k for k, t in _seen_msg_ids.items() if now - t > _DEDUP_TTL]
+    for k in expired:
+        _seen_msg_ids.pop(k, None)
+    if msg_id in _seen_msg_ids:
+        return True
+    _seen_msg_ids[msg_id] = now
+    return False
 
 # Groq / LLM client config
 _LLM_URL = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
@@ -160,6 +177,7 @@ async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
                 f"{sb}/rest/v1/reports",
                 headers=_sb_headers(key),
                 json=row,
+                params={"on_conflict": "source,source_url"},
             )
             if resp.status_code in (200, 201):
                 rows = resp.json()
@@ -207,9 +225,10 @@ async def _handle_message(payload: dict, app: Any) -> None:
         _conv_state[phone].append({"role": "user", "content": body})
 
     # If photo received: store and trigger face pipeline
-    if has_media and media_url and media_url.startswith("https://"):
+    if has_media and media_url:
         _conv_state[phone].append({"role": "user", "content": f"[envio una foto: {media_url}]"})
-        # Try to find an existing pending report for this phone
+        # Find the most recent report for this phone via source_url
+        conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
         sb = settings.supabase_url.rstrip("/")
         sb_key = settings.supabase_service_role_key
         try:
@@ -220,7 +239,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
                         "apikey": sb_key,
                         "Authorization": f"Bearer {sb_key}",
                     },
-                    params={"phone": f"eq.{phone}", "order": "created_at.desc", "limit": "1"},
+                    params={"source_url": f"eq.waha:{conv_key}", "order": "created_at.desc", "limit": "1"},
                 )
                 rows = r.json() if r.status_code == 200 else []
                 if rows:
@@ -308,6 +327,9 @@ async def waha_webhook(request: Request, background_tasks: BackgroundTasks) -> d
     payload = data.get("payload", {})
 
     if event == "message" and not payload.get("fromMe", False):
+        msg_id = payload.get("id", "")
+        if msg_id and _is_duplicate(msg_id):
+            return {"ok": True}
         background_tasks.add_task(_handle_message, payload, request.app)
 
     return {"ok": True}
