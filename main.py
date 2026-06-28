@@ -40,6 +40,7 @@ from consolidation_pipeline import (
     run_face_cross_match,
     run_full_consolidation,
 )
+from dedup_pipeline import run_dedup_pipeline
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
 from waha_intake import router as waha_router
 
@@ -88,6 +89,13 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         run_text_cross_match, IntervalTrigger(seconds=3600),
         args=[app], id="text_cross_match", max_instances=1,
+    )
+
+    # Background deduplication: cluster near-duplicate reports across scrapers
+    # and annotate non-canonical rows so fuzzy search/review can collapse them.
+    scheduler.add_job(
+        run_dedup_pipeline, IntervalTrigger(seconds=14400),  # every 4h
+        args=[app], id="dedup_pipeline", max_instances=1,
     )
 
     asyncio.create_task(_startup_sweep(scrapers))
