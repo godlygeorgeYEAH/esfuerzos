@@ -97,13 +97,36 @@ def _source_label(source: str) -> str:
     return SOURCE_LABELS.get(source, source or "fuente externa")
 
 
+def _resolve_source_url(source: str, source_url: str | None) -> str | None:
+    """Turn a stored source_url into a real, openable URL when we know how."""
+    if not source_url:
+        return None
+    if source_url.startswith("http"):
+        return source_url
+    # source_url is "<scheme>:<id>" for several scrapers
+    ident = source_url.split(":", 1)[1] if ":" in source_url else source_url
+    if source == "venezuela_te_busca":
+        return f"https://venezuelatebusca.com/?person={ident}"
+    if source == "venezreporta":
+        return "https://venezuelareporta.org"
+    if source == "tuayudave":
+        return "https://tuayudave.com"
+    if source == "sos_laguaira":
+        return "https://soslaguaira.lat"
+    return None
+
+
 def _format_match_line(m: dict) -> str:
-    """Format one candidate as a WhatsApp bullet: name, age, location [Source]."""
+    """Format one candidate: name, age, location [Source] + URL if resolvable."""
     name = m.get("full_name") or "Desconocido"
     age = m.get("age") or "?"
     loc = m.get("last_seen_location") or "ubicación por confirmar"
     label = _source_label(m.get("source", ""))
-    return f"• {name}, {age} años — {loc} [{label}]"
+    line = f"• {name}, {age} años — {loc} [{label}]"
+    url = _resolve_source_url(m.get("source", ""), m.get("source_url"))
+    if url:
+        line += f"\n  {url}"
+    return line
 
 
 def _dedup_candidates(rows: list, limit: int = 3) -> list:
@@ -344,7 +367,7 @@ async def _search_existing_matches(name: str, kind: str, exclude_id: str | None 
         async with httpx.AsyncClient(timeout=10) as cl:
             for token in tokens[:3]:  # up to 3 most distinctive tokens
                 params = {
-                    "select": "id,full_name,age,last_seen_location,source,kind",
+                    "select": "id,full_name,age,last_seen_location,source,source_url,kind",
                     "full_name": f"ilike.*{token}*",
                     "limit": "15",
                     "order": "created_at.desc",
@@ -368,10 +391,10 @@ async def _search_existing_matches(name: str, kind: str, exclude_id: str | None 
     return results[:40]
 
 
-async def _lookup_match_details(match_id: str, source_report_id: str) -> tuple:
-    """Given a face match_id, return (name, location, source) of the OTHER
-    report in the match (the matched person, not the one who sent the photo).
-    Returns (None, None, None) on any failure."""
+async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
+    """Given a face match_id, return details of the OTHER report in the match
+    (the matched person, not the photo sender): name, location, source, url.
+    Returns {} on any failure."""
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
     hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
@@ -383,23 +406,27 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> tuple:
                 params={"id": f"eq.{match_id}", "select": "missing_id,found_id"},
             )
             if mr.status_code != 200 or not mr.json():
-                return (None, None, None)
+                return {}
             row = mr.json()[0]
-            # The matched person is whichever side is not the photo sender's report
             other_id = row["found_id"] if row.get("missing_id") == source_report_id else row["missing_id"]
             if not other_id:
-                return (None, None, None)
+                return {}
             rr = await cl.get(
                 f"{sb}/rest/v1/reports",
                 headers=hdr,
-                params={"id": f"eq.{other_id}", "select": "full_name,last_seen_location,source"},
+                params={"id": f"eq.{other_id}", "select": "full_name,last_seen_location,source,source_url"},
             )
             if rr.status_code == 200 and rr.json():
                 rep = rr.json()[0]
-                return (rep.get("full_name"), rep.get("last_seen_location"), rep.get("source"))
+                return {
+                    "name": rep.get("full_name"),
+                    "location": rep.get("last_seen_location"),
+                    "source": rep.get("source"),
+                    "url": _resolve_source_url(rep.get("source", ""), rep.get("source_url")),
+                }
     except Exception as exc:
         logger.warning("lookup_match_details failed: %s", exc)
-    return (None, None, None)
+    return {}
 
 
 async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
@@ -557,25 +584,21 @@ async def _handle_message(payload: dict, app: Any) -> None:
                         photo_analyzed = True
                         match_id = await process_photo_for_report(report_id, media_url, app)
                         if match_id:
-                            found_name_hint, found_loc_hint, found_src_hint = \
-                                await _lookup_match_details(match_id, report_id)
-                            if found_loc_hint:
-                                src_txt = f" (via {_source_label(found_src_hint)})" if found_src_hint else ""
+                            d = await _lookup_match_details(match_id, report_id)
+                            nm = d.get("name") or "persona registrada"
+                            src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
+                            url_txt = f"\n{d['url']}" if d.get("url") else ""
+                            if d.get("location"):
                                 face_reply = (
-                                    f"Analicé la foto. Hay una posible coincidencia facial: "
-                                    f"*{found_name_hint or 'persona registrada'}*, ubicación: "
-                                    f"*{found_loc_hint}*{src_txt}. Reúne VE verificará y te contactará."
-                                )
-                            elif found_name_hint:
-                                face_reply = (
-                                    f"Analicé la foto. Hay una posible coincidencia facial: "
-                                    f"*{found_name_hint}*, ubicación por confirmar. "
-                                    "Reúne VE verificará y te contactará."
+                                    f"Analicé la foto. Hay una *posible* coincidencia facial: "
+                                    f"*{nm}*, ubicación: *{d['location']}*{src_txt}.{url_txt}\n"
+                                    "En verificación — Reúne VE confirmará y te contactará."
                                 )
                             else:
                                 face_reply = (
-                                    "Analicé la foto. Hay una posible coincidencia facial en verificación. "
-                                    "Reúne VE confirmará la ubicación y te contactará."
+                                    f"Analicé la foto. Hay una *posible* coincidencia facial: "
+                                    f"*{nm}*{src_txt}, ubicación por confirmar.{url_txt}\n"
+                                    "En verificación — Reúne VE confirmará y te contactará."
                                 )
                             await _waha_send(phone, face_reply)
                             face_match_found = True

@@ -37,13 +37,11 @@ from waha_intake import _waha_send, _source_label
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Auto-notify ONLY on a strong FACE match. Text-only matches (combined=text_score)
-# fire at ~0.82 for common name + same city — that is a coincidence, not identity
-# evidence, and auto-messaging a grieving family on it is the exact false-hope harm
-# the system forbids. Text matches wait for human review (status='confirmed').
-_FACE_NOTIFY_THRESHOLD = 0.78
-# Don't message the same family more than once per this window, regardless of how
-# many match rows their report appears in.
+# GP rule: notify a family ONLY after a human has verified the match
+# (matches.status='confirmed'). No auto-notify on raw algorithmic score — a false
+# positive sent as fact to a grieving family is the worst-case failure. The score
+# threshold instead governs which matches surface in the human review queue
+# (see /admin/matches). Confirmed → notify the subscribed family.
 _COOLDOWN_HOURS = 24
 _BATCH = 100
 
@@ -90,17 +88,15 @@ async def run_match_notifier(app: Any) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=20) as cl:
-            # 1. Unnotified STRONG FACE matches only (text-only matches excluded:
-            #    they fire on common-name coincidences -> false hope).
+            # 1. HUMAN-CONFIRMED, not-yet-notified matches only.
             mr = await cl.get(
                 f"{sb}/rest/v1/matches",
                 headers=_hdr(key),
                 params={
-                    "select": "id,missing_id,found_id,face_score,notify_sent,status",
+                    "select": "id,missing_id,found_id,combined_score,notify_sent,status",
                     "notify_sent": "eq.false",
-                    "status": "neq.rejected",  # never message a human-rejected pair
-                    "face_score": f"gte.{_FACE_NOTIFY_THRESHOLD}",
-                    "order": "face_score.desc",
+                    "status": "eq.confirmed",
+                    "order": "combined_score.desc",
                     "limit": str(_BATCH),
                 },
             )

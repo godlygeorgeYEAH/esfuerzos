@@ -238,5 +238,92 @@ async def admin_consolidate(
     return {"ok": True, "message": msg}
 
 
+def _check_admin(x_admin_key: str) -> None:
+    if settings.admin_key and not secrets.compare_digest(x_admin_key, settings.admin_key):
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+
+@app.post("/admin/llm-scrape")
+async def admin_llm_scrape(
+    url: str = "",
+    text: str = "",
+    dry_run: bool = False,
+    x_admin_key: str = Header(default=""),
+):
+    """LLM panel (Mode A): extract person records from a URL or pasted text into
+    the llm_leads REVIEW QUEUE (human-approved before entering the corpus)."""
+    _check_admin(x_admin_key)
+    from llm_extractor import extract_to_queue
+    result = await extract_to_queue(url=url or None, text=text or None, dry_run=dry_run)
+    return {"ok": True, **result}
+
+
+@app.post("/admin/llm-approve")
+async def admin_llm_approve(lead_id: str, x_admin_key: str = Header(default="")):
+    """Promote a reviewed llm_leads row into the canonical reports table."""
+    _check_admin(x_admin_key)
+    from llm_extractor import approve_lead
+    return await approve_lead(lead_id, app)
+
+
+@app.get("/admin/matches")
+async def admin_list_matches(
+    status: str = "pending",
+    min_score: float = 0.0,
+    limit: int = 50,
+    x_admin_key: str = Header(default=""),
+):
+    """Human review queue: list matches (with both reports' details) for
+    verification. Default: pending, highest combined_score first."""
+    _check_admin(x_admin_key)
+    sb = settings.supabase_url.rstrip("/")
+    k = settings.supabase_service_role_key
+    hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
+    async with httpx.AsyncClient(timeout=15) as cl:
+        r = await cl.get(f"{sb}/rest/v1/matches", headers=hdr, params={
+            "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,created_at",
+            "status": f"eq.{status}",
+            "combined_score": f"gte.{min_score}",
+            "order": "combined_score.desc",
+            "limit": str(limit),
+        })
+        matches = r.json() if r.status_code == 200 else []
+        # Enrich with both reports' names/locations/sources
+        ids = {m[k2] for m in matches for k2 in ("missing_id", "found_id") if m.get(k2)}
+        reps = {}
+        if ids:
+            rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
+                "select": "id,full_name,age,last_seen_location,source,source_url,kind",
+                "id": f"in.({','.join(ids)})"})
+            reps = {x["id"]: x for x in (rr.json() if rr.status_code == 200 else [])}
+        for m in matches:
+            m["missing"] = reps.get(m.get("missing_id"))
+            m["found"] = reps.get(m.get("found_id"))
+    return {"ok": True, "count": len(matches), "matches": matches}
+
+
+@app.post("/admin/match-review")
+async def admin_match_review(
+    match_id: str,
+    decision: str,
+    x_admin_key: str = Header(default=""),
+):
+    """Human verifies a match: decision = 'confirmed' | 'rejected'. Confirmed
+    matches get picked up by the notifier and the family is alerted."""
+    _check_admin(x_admin_key)
+    if decision not in ("confirmed", "rejected"):
+        raise HTTPException(status_code=400, detail="decision must be confirmed|rejected")
+    sb = settings.supabase_url.rstrip("/")
+    k = settings.supabase_service_role_key
+    hdr = {"apikey": k, "Authorization": f"Bearer {k}", "Content-Type": "application/json",
+           "Prefer": "return=minimal"}
+    async with httpx.AsyncClient(timeout=15) as cl:
+        resp = await cl.patch(f"{sb}/rest/v1/matches", headers=hdr,
+                              params={"id": f"eq.{match_id}"},
+                              json={"status": decision})
+        ok = resp.status_code in (200, 204)
+    return {"ok": ok, "match_id": match_id, "status": decision}
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
