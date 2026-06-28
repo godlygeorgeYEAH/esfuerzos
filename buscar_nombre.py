@@ -1,10 +1,13 @@
 """
 buscar_nombre.py — CLI para probar la cadena de matching de nombres contra la BD.
 
-Uso:
+Uso — nombre único:
     python buscar_nombre.py "José Rodriguez"
     python buscar_nombre.py "Anahys" --edad 32 --ubicacion "La Guaira"
-    python buscar_nombre.py "González" --limite 20
+
+Uso — lista desde archivo (un nombre por línea):
+    python buscar_nombre.py --archivo input.txt
+    python buscar_nombre.py --archivo input.txt --limite 20 --ubicacion "La Guaira"
 
 Requiere SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en el entorno o en .env
 """
@@ -214,11 +217,7 @@ def _print_results(results: list, query_name: str, query_age, query_location) ->
 # Main
 # ---------------------------------------------------------------------------
 
-async def main(query_name: str, query_age, query_location: str | None, limite: int) -> None:
-    if not _HAS_FUZZ:
-        print("[WARN] rapidfuzz no instalado — fuzzy scoring desactivado. "
-              "Instalá con: pip install rapidfuzz", file=sys.stderr)
-
+async def _run_one(query_name: str, query_age, query_location: str | None, limite: int) -> None:
     print(f"[1/2] Recall ILIKE → Supabase...", end=" ", flush=True)
     candidates = await _recall(query_name, limite)
     print(f"{len(candidates)} candidatos")
@@ -230,12 +229,41 @@ async def main(query_name: str, query_age, query_location: str | None, limite: i
     _print_results(ranked, query_name, query_age, query_location)
 
 
+async def main(args: argparse.Namespace) -> None:
+    if not _HAS_FUZZ:
+        print("[WARN] rapidfuzz no instalado — fuzzy scoring desactivado. "
+              "Instalá con: pip install rapidfuzz", file=sys.stderr)
+
+    if args.archivo:
+        try:
+            with open(args.archivo, encoding="utf-8") as f:
+                nombres = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        except FileNotFoundError:
+            sys.exit(f"[ERROR] No se encontró el archivo: {args.archivo}")
+
+        total = len(nombres)
+        print(f"\nArchivo: {args.archivo} — {total} nombre(s)\n{'═' * 60}")
+
+        for i, nombre in enumerate(nombres, 1):
+            print(f"\n{'═' * 60}")
+            print(f"  [{i}/{total}] {nombre}")
+            print(f"{'═' * 60}")
+            await _run_one(nombre, args.edad, args.ubicacion, args.limite)
+    else:
+        await _run_one(args.nombre, args.edad, args.ubicacion, args.limite)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Buscar nombre en la BD de Reune VE")
-    parser.add_argument("nombre", help="Nombre a buscar (ej: 'José Rodriguez')")
+    parser = argparse.ArgumentParser(description="Buscar nombre(s) en la BD de Reune VE")
+    grupo = parser.add_mutually_exclusive_group(required=True)
+    grupo.add_argument("nombre", nargs="?", help="Nombre a buscar (ej: 'José Rodriguez')")
+    grupo.add_argument("--archivo", metavar="ARCHIVO", help="Archivo .txt con un nombre por línea")
     parser.add_argument("--edad", type=int, default=None, help="Edad aproximada (opcional)")
     parser.add_argument("--ubicacion", default=None, help="Ubicación (opcional, ej: 'La Guaira')")
-    parser.add_argument("--limite", type=int, default=50, help="Máx candidatos del recall (default: 50)")
+    parser.add_argument("--limite", type=int, default=50, help="Máx candidatos del recall por nombre (default: 50)")
     args = parser.parse_args()
 
-    asyncio.run(main(args.nombre, args.edad, args.ubicacion, args.limite))
+    if not args.nombre and not args.archivo:
+        parser.error("Debés proveer un nombre o --archivo")
+
+    asyncio.run(main(args))
