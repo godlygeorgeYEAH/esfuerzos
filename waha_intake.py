@@ -36,7 +36,6 @@ import json
 import logging
 import re
 import time
-import unicodedata
 import uuid
 from collections import defaultdict, deque
 from typing import Any
@@ -48,6 +47,12 @@ from config import get_settings
 from consolidation_pipeline import embed_and_match_report
 from face_pipeline import process_photo_for_report
 from scrapers.base import age_match_score
+from text_normalize import (
+    deaccent as _deaccent_shared,
+    location_score,
+    phonetic_token,
+    phonetic_token_set,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -132,37 +137,33 @@ except ImportError:  # pragma: no cover
 _NAME_FLOOR = 0.60
 
 
-def _deaccent(s: str) -> str:
-    """Lowercase + strip accents so 'García' == 'Garcia' (essential for VE names)."""
-    return "".join(
-        ch for ch in unicodedata.normalize("NFD", s.lower())
-        if unicodedata.category(ch) != "Mn"
-    )
-
-
 def _name_score(query: str, cand: str) -> float:
     """0..1 name similarity that requires real token overlap, not just one
-    shared given name. Accent-insensitive. Blends bidirectional token overlap
-    with token-sort ratio."""
-    q = _deaccent(query)
-    c = _deaccent(cand)
+    shared given name. Accent-insensitive, with a Spanish-phonetic channel so
+    homophones (José/Hose, González/Gonsales) still match. Blends bidirectional
+    token overlap with token-sort ratio."""
+    q = _deaccent_shared(query)
+    c = _deaccent_shared(cand)
     qt = [t for t in q.split() if len(t) >= 3]
     ct = [t for t in c.split() if len(t) >= 3]
     if not qt or not ct:
         return 0.0
-    if not _HAS_FUZZ:
-        matched = sum(1 for t in qt if t in ct)
-        return matched / min(len(qt), len(ct))
-    matched = sum(1 for t in qt if any(_fuzz.ratio(t, u) >= 85 for u in ct))
+    cand_phon = phonetic_token_set(cand)
+    matched = 0
+    for t in qt:
+        fuzzy_hit = _HAS_FUZZ and any(_fuzz.ratio(t, u) >= 85 for u in ct)
+        phon_hit = phonetic_token(t) in cand_phon          # homophone channel
+        if fuzzy_hit or phon_hit or t in ct:
+            matched += 1
     overlap = matched / min(len(qt), len(ct))      # fraction of smaller name matched
-    tsr = _fuzz.token_sort_ratio(q, c) / 100.0     # whole-string, order-insensitive
+    tsr = (_fuzz.token_sort_ratio(q, c) / 100.0) if _HAS_FUZZ else overlap
     return 0.6 * overlap + 0.4 * tsr
 
 
-def _rank_candidates(query_name: str, query_age, rows: list) -> list:
+def _rank_candidates(query_name: str, query_age, rows: list, query_location: str | None = None) -> list:
     """Drop candidates whose name doesn't really match, then rank survivors by
-    name (dominant) + age proximity. Fixes 'Arantza Bastidas Dias' surfacing an
-    unrelated 'Ramirez Arantza'."""
+    name (dominant) + age proximity + location agreement (canonicalized, so
+    'Vargas'/'Maiquetía'/'Litoral Central' all count as 'La Guaira')."""
     try:
         q_age = int(str(query_age).strip()) if query_age not in (None, "") else None
     except (ValueError, TypeError):
@@ -176,8 +177,9 @@ def _rank_candidates(query_name: str, query_age, rows: list) -> list:
         ns = _name_score(query_name, cand_name)
         if ns < _NAME_FLOOR:
             continue
-        ag = age_match_score(q_age, m.get("age"))        # 0..1, 0.5 if unknown
-        score = 0.8 * ns + 0.2 * ag
+        ag = age_match_score(q_age, m.get("age"))                       # 0..1, 0.5 if unknown
+        loc = location_score(query_location, m.get("last_seen_location"))  # 0..1, 0.5 if unknown
+        score = 0.7 * ns + 0.15 * ag + 0.15 * loc
         scored.append((score, {**m, "_score": round(score, 3)}))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
@@ -597,7 +599,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
             if reply:
                 await _waha_send(phone, reply)
             candidates = await _search_existing_matches(name, kind, exclude_id=report_id)
-            ranked = _rank_candidates(name, extracted.get("age"), candidates)
+            ranked = _rank_candidates(name, extracted.get("age"), candidates, extracted.get("location"))
             unique = _dedup_candidates(ranked, limit=3)
             if unique:
                 match_text = (
@@ -626,7 +628,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
         _proactive_searched.add(phone)  # mark before await so it can't double-fire
         prov_kind = extracted.get("kind") or "missing"
         prov_candidates = await _search_existing_matches(extracted_name, prov_kind)
-        prov_ranked = _rank_candidates(extracted_name, extracted.get("age"), prov_candidates)
+        prov_ranked = _rank_candidates(extracted_name, extracted.get("age"), prov_candidates, extracted.get("location"))
         prov_unique = _dedup_candidates(prov_ranked, limit=3)
         if prov_unique:
             if reply:

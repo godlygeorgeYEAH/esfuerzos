@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from text_normalize import normalize_location, status_rank
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -48,7 +50,8 @@ _PATCH_CONCURRENCY = 8       # max simultaneous PATCH calls
 
 
 def _norm_loc(loc: str | None) -> str:
-    return "".join((loc or "").lower().split())[:_LOC_PREFIX]
+    # Canonicalize first so 'Vargas'/'Maiquetía'/'Litoral Central' bucket together.
+    return (normalize_location(loc) or "")[:_LOC_PREFIX]
 
 
 def _completeness(rec: dict) -> int:
@@ -125,10 +128,15 @@ def _cluster(rows: list[dict]) -> list[tuple[dict, list[dict]]]:
                     used.add(other["id"])
             if len(members) < 2:
                 continue
-            # Canonical: most complete; tie -> older (earliest created_at)
+            # Canonical: most-definitive status first (deceased>found>injured>
+            # missing>unknown), then most complete, then older record.
             canonical = max(
                 members,
-                key=lambda m: (_completeness(m), _neg_created(m)),
+                key=lambda m: (
+                    status_rank(m.get("kind"), m.get("distinguishing_marks")),
+                    _completeness(m),
+                    _neg_created(m),
+                ),
             )
             dups = [m for m in members if m["id"] != canonical["id"]]
             clusters.append((canonical, dups))
