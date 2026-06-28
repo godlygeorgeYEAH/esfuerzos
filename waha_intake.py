@@ -81,6 +81,101 @@ _searched_shown: set[str] = set()
 _seen_msg_ids: dict[str, float] = {}
 _DEDUP_TTL = 60.0
 
+# B1: per-phone rate limit (sliding window). Generous for a panicked reporter,
+# blocks one phone from spamming Groq/DB. Self-purges old timestamps.
+_phone_hits: dict[str, deque] = defaultdict(lambda: deque(maxlen=64))
+_RATE_MAX = 20
+_RATE_WINDOW = 60.0
+
+
+_rate_calls = 0
+
+
+def _phone_rate_limited(phone: str) -> bool:
+    global _rate_calls
+    now = time.monotonic()
+    _rate_calls += 1
+    if _rate_calls % 1000 == 0:  # B4: sweep idle phones so _phone_hits stays bounded
+        for p in [p for p, dq in _phone_hits.items() if not dq or now - dq[-1] > _RATE_WINDOW]:
+            _phone_hits.pop(p, None)
+    dq = _phone_hits[phone]
+    while dq and now - dq[0] > _RATE_WINDOW:
+        dq.popleft()
+    if len(dq) >= _RATE_MAX:
+        return True
+    dq.append(now)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# B3/B4: durable per-phone session (Supabase waha_sessions) so a restart never
+# loses in-flight reports, and in-memory state is evicted after each message.
+# ---------------------------------------------------------------------------
+async def _load_session(phone: str) -> None:
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    try:
+        async with httpx.AsyncClient(timeout=6) as cl:
+            r = await cl.get(f"{sb}/rest/v1/waha_sessions",
+                             headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                             params={"phone": f"eq.{phone}", "select": "state", "limit": "1"})
+            rows = r.json() if r.status_code == 200 else []
+    except Exception as exc:
+        logger.warning("load_session: %s", exc)
+        return
+    if not rows:
+        return
+    st = rows[0].get("state") or {}
+    dq = _conv_state[phone]
+    dq.clear()
+    for m in (st.get("conv") or [])[-20:]:
+        dq.append(m)
+    if st.get("collected"):
+        _collected[phone] = dict(st["collected"])
+    if st.get("rkey"):
+        _report_keys[phone] = st["rkey"]
+    if st.get("searched"):
+        _searched_shown.add(phone)
+
+
+async def _save_session(phone: str) -> bool:
+    """Persist session to Supabase. Returns True on success. If the table is
+    absent (migration 013 not applied), returns False → caller keeps in-memory
+    state (graceful degradation to the pre-B3 behavior)."""
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    st = {
+        "conv": list(_conv_state.get(phone, [])),
+        "collected": _collected.get(phone, {}),
+        "rkey": _report_keys.get(phone),
+        "searched": phone in _searched_shown,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=6) as cl:
+            resp = await cl.post(
+                f"{sb}/rest/v1/waha_sessions",
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "resolution=merge-duplicates,return=minimal"},
+                params={"on_conflict": "phone"},
+                json={"phone": phone, "state": st, "updated_at": "now()"},
+            )
+            if resp.status_code in (200, 201, 204):
+                return True
+            logger.warning("save_session %d: %s", resp.status_code, resp.text[:120])
+    except Exception as exc:
+        logger.warning("save_session: %s", exc)
+    return False
+
+
+def _evict_memory(phone: str) -> None:
+    # State is now durable in Supabase; drop the in-memory copies so memory only
+    # holds phones being actively processed (B4 — prevents unbounded growth/OOM).
+    _conv_state.pop(phone, None)
+    _collected.pop(phone, None)
+    _report_keys.pop(phone, None)
+    _searched_shown.discard(phone)
+
 # Human-readable labels for each scraper source. Shown to families so a match
 # result reads "via Venezuela Reporta" instead of the raw "venezreporta" token.
 SOURCE_LABELS: dict[str, str] = {
@@ -566,15 +661,88 @@ def _extract_media_url(payload: dict) -> str:
     return payload.get("mediaUrl") or payload.get("mediaURL") or ""
 
 
+async def _handle_photo(phone: str, media_url: str, report_id: str | None,
+                        app: Any, has_body: bool) -> None:
+    """Attach a photo to the report and run face matching. B2: report_id is the
+    report just created from this message's caption (if any); falls back to the
+    phone's active report key for photo-after-report. Sends its own reply."""
+    _conv_state[phone].append({"role": "user", "content": "[envio una foto]"})
+    if not media_url:
+        if not has_body:
+            await _waha_send(phone, "Recibí la foto pero no pude descargarla. ¿Puedes reenviarla?")
+        return
+    sb = settings.supabase_url.rstrip("/")
+    sb_key = settings.supabase_service_role_key
+    hdr = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    rid = report_id
+    try:
+        async with httpx.AsyncClient(timeout=8) as cl:
+            if not rid:  # photo without a freshly-created report → active report
+                r = await cl.get(f"{sb}/rest/v1/reports", headers=hdr,
+                                 params={"source_url": f"eq.waha:{_report_key(phone)}",
+                                         "order": "created_at.desc", "limit": "1"})
+                rows = r.json() if r.status_code == 200 else []
+                rid = rows[0]["id"] if rows else None
+            if rid:
+                await cl.post(
+                    f"{sb}/rest/v1/photos",
+                    headers={**hdr, "Content-Type": "application/json",
+                             "Prefer": "resolution=ignore-duplicates,return=minimal"},
+                    json={"id": str(uuid.uuid4()), "report_id": rid, "storage_path": media_url},
+                )
+        if rid:
+            match_id = await process_photo_for_report(rid, media_url, app)
+            if match_id:
+                d = await _lookup_match_details(match_id, rid)
+                if d.get("name") or d.get("location"):
+                    nm = d.get("name") or "persona registrada"
+                    src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
+                    url_txt = f"\n{d['url']}" if d.get("url") else ""
+                    locp = f", ubicación: *{d['location']}*" if d.get("location") else ", ubicación por confirmar"
+                    await _waha_send(
+                        phone,
+                        f"Analicé la foto. Hay una *posible* coincidencia facial: *{nm}*{locp}{src_txt}.{url_txt}\n"
+                        "En verificación — Reúne VE confirmará y te contactará.")
+                else:
+                    await _waha_send(
+                        phone,
+                        "Analicé la foto. Hay una posible coincidencia en verificación. "
+                        "El equipo Reúne VE la revisará y te contactará si se confirma.")
+            else:
+                await _waha_send(
+                    phone,
+                    "Analicé la foto con reconocimiento facial y la guardé. Por ahora no hay "
+                    "coincidencias visuales, pero la comparo con cada nuevo registro y te aviso si aparece.")
+            return
+    except Exception as exc:
+        logger.error("Photo handling error: %s", exc)
+    if not has_body:
+        await _waha_send(phone, "Recibí la foto. Para buscarla, dime el nombre o los datos de la persona.")
+
+
 async def _handle_message(payload: dict, app: Any) -> None:
     phone = payload.get("from", "")
+    if payload.get("fromMe", False) or not phone:
+        return
+    # B1: per-phone rate limit — drop abusive bursts from a single number.
+    if _phone_rate_limited(phone):
+        logger.warning("rate-limited phone %s (>%d/%ds)", _hp(phone), _RATE_MAX, int(_RATE_WINDOW))
+        return
+    # B3: hydrate durable session → process → persist + evict from memory (B4).
+    await _load_session(phone)
+    try:
+        await _process_message(payload, phone, app)
+    finally:
+        # Evict from memory ONLY if the state was durably saved (B4). If the
+        # waha_sessions table isn't there yet, keep in-memory (degrade safely).
+        if await _save_session(phone):
+            _evict_memory(phone)
+
+
+async def _process_message(payload: dict, phone: str, app: Any) -> None:
     body = (payload.get("body") or "").strip()
     media_url = _extract_media_url(payload)
     has_media = payload.get("hasMedia", False) or bool(media_url)
-    from_me = payload.get("fromMe", False)
-
-    if from_me or not phone:
-        return
 
     logger.info("WAHA message from %s: has_media=%s media_url=%s body_len=%d",
                 _hp(phone), has_media, media_url or "None", len(body))
@@ -591,98 +759,16 @@ async def _handle_message(payload: dict, app: Any) -> None:
                     "http://127.0.0.1:3000", "https://127.0.0.1:3000"):
             media_url = media_url.replace(pub, waha_host)
 
-    # If photo received (always handle, even if media_url is missing)
-    if has_media:
-        _conv_state[phone].append({"role": "user", "content": "[envio una foto]"})
-        face_match_found = False
-        photo_analyzed = False
-
-        if media_url:
-            conv_key_photo = _report_key(phone)  # P0-b: the active report's key
-            sb = settings.supabase_url.rstrip("/")
-            sb_key = settings.supabase_service_role_key
-            try:
-                async with httpx.AsyncClient(timeout=8) as cl:
-                    r = await cl.get(
-                        f"{sb}/rest/v1/reports",
-                        headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
-                        params={"source_url": f"eq.waha:{conv_key_photo}", "order": "created_at.desc", "limit": "1"},
-                    )
-                    rows = r.json() if r.status_code == 200 else []
-                    if rows:
-                        report_id = rows[0]["id"]
-                        await cl.post(
-                            f"{sb}/rest/v1/photos",
-                            headers={
-                                "apikey": sb_key,
-                                "Authorization": f"Bearer {sb_key}",
-                                "Content-Type": "application/json",
-                                "Prefer": "resolution=ignore-duplicates,return=minimal",
-                            },
-                            json={"id": str(uuid.uuid4()), "report_id": report_id, "storage_path": media_url},
-                        )
-                        photo_analyzed = True
-                        match_id = await process_photo_for_report(report_id, media_url, app)
-                        if match_id:
-                            # P0-c: _lookup_match_details returns {} unless disclosure is
-                            # safe (strong score + PUBLIC source). Otherwise → generic.
-                            d = await _lookup_match_details(match_id, report_id)
-                            if d.get("name") or d.get("location"):
-                                nm = d.get("name") or "persona registrada"
-                                src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
-                                url_txt = f"\n{d['url']}" if d.get("url") else ""
-                                locp = f", ubicación: *{d['location']}*" if d.get("location") else ", ubicación por confirmar"
-                                face_reply = (
-                                    f"Analicé la foto. Hay una *posible* coincidencia facial: "
-                                    f"*{nm}*{locp}{src_txt}.{url_txt}\n"
-                                    "En verificación — Reúne VE confirmará y te contactará."
-                                )
-                            else:
-                                face_reply = (
-                                    "Analicé la foto. Hay una posible coincidencia en verificación. "
-                                    "El equipo Reúne VE la revisará y te contactará si se confirma."
-                                )
-                            await _waha_send(phone, face_reply)
-                            face_match_found = True
-            except Exception as exc:
-                logger.error("Photo handling error: %s", exc)
-
-        if not face_match_found:
-            if photo_analyzed:
-                # Photo ran through face recognition but matched nothing yet.
-                # Say so explicitly — otherwise it looks like nothing happened.
-                msg = (
-                    "Analicé la foto con reconocimiento facial y la guardé. "
-                    "Por ahora no hay coincidencias visuales, pero la comparo "
-                    "automáticamente con cada nuevo registro y te aviso si aparece."
-                )
-                _conv_state[phone].append({"role": "assistant", "content": msg})
-                await _waha_send(phone, msg)
-            else:
-                # No report yet / couldn't fetch media — guide the user with Groq.
-                photo_prompt = body if body else (
-                    "El usuario envió una foto pero aún no hay un reporte. "
-                    "Pídele de forma cálida el nombre y datos de la persona para poder buscarla."
-                )
-                result = await _llm_extract(phone, photo_prompt)
-                photo_reply = result.get("reply", "Recibí la foto. Para buscar, dime el nombre de la persona.")
-                _conv_state[phone].append({"role": "assistant", "content": photo_reply})
-                await _waha_send(phone, photo_reply)
-
-        if not body:
-            return
-
-    if not body:
-        return
-
-    # LLM extraction
-    result = await _llm_extract(phone, body)
-    reply = result.get("reply", "")
-    extracted = result.get("extracted", {})
-
-    # Update conversation state with assistant reply
-    if reply:
-        _conv_state[phone].append({"role": "assistant", "content": reply})
+    # B2: extract from the caption/text and create the report FIRST, so a photo
+    # in the SAME message attaches to it. Media is handled after, below.
+    extracted: dict = {}
+    reply = ""
+    if body:
+        result = await _llm_extract(phone, body)
+        reply = result.get("reply", "")
+        extracted = result.get("extracted", {})
+        if reply:
+            _conv_state[phone].append({"role": "assistant", "content": reply})
 
     name = (extracted.get("name") or "").strip()
     kind = extracted.get("kind") or "missing"
@@ -712,6 +798,13 @@ async def _handle_message(payload: dict, app: Any) -> None:
                 "distinguishing_marks": desc,
                 "kind": kind,
             }, app))
+
+    # B2: handle any photo now that the report (if any) exists, so a lead-with-photo
+    # message attaches the image to the report just created from its caption.
+    if has_media:
+        await _handle_photo(phone, media_url, report_id, app, bool(body))
+        if not body:
+            return
 
     # Name search only for REAL names. An unidentified found person can't be
     # text-searched usefully; it relies on the face + background cross-match.

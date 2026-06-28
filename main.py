@@ -49,7 +49,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+# B1: NO global per-IP default. All WhatsApp webhooks arrive from a single source
+# (the WAHA container), so a per-IP cap would throttle ALL users to one bucket and
+# drop messages in a real surge. Rate limiting is done PER-PHONE in waha_intake
+# instead. The limiter object stays for optional explicit per-route limits.
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 
 
