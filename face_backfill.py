@@ -83,6 +83,26 @@ def _foto_url(raw_data: Any, source: str) -> str | None:
     return None
 
 
+_PHOTO_OR = ("(raw_data->>foto_url.not.is.null,raw_data->>photoUrl.not.is.null,"
+             "raw_data->>photo_url.not.is.null,raw_data->>imageUrl.not.is.null)")
+
+
+async def _fetch(cl, sb, hdr, *, order, limit, after=None):
+    params = {
+        "select": "id,kind,source,created_at,raw_data",
+        "or": _PHOTO_OR,
+        "order": order,
+        "limit": str(limit),
+    }
+    if after:
+        params["created_at"] = f"gt.{after}"
+    r = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params=params)
+    if r.status_code != 200:
+        logger.warning("face_backfill: fetch %d: %s", r.status_code, r.text[:120])
+        return None
+    return r.json() or []
+
+
 async def run_face_backfill(app: Any) -> dict:
     sb = app.state.supabase_url.rstrip("/")
     key = app.state.supabase_service_key
@@ -93,37 +113,32 @@ async def run_face_backfill(app: Any) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=20) as cl:
-            r = await cl.get(
-                f"{sb}/rest/v1/reports",
-                headers=hdr,
-                params={
-                    "select": "id,kind,source,created_at,raw_data",
-                    # any of the known photo keys present
-                    "or": "(raw_data->>foto_url.not.is.null,raw_data->>photoUrl.not.is.null,"
-                          "raw_data->>photo_url.not.is.null,raw_data->>imageUrl.not.is.null)",
-                    "created_at": f"gt.{cursor}",
-                    "order": "created_at.asc",
-                    "limit": str(_BATCH),
-                },
-            )
-            if r.status_code != 200:
-                logger.warning("face_backfill: fetch %d: %s", r.status_code, r.text[:120])
-                return {"processed": 0, "embedded": 0, "errors": 1}
-            rows = r.json() or []
-            if not rows:
-                return {"processed": 0, "embedded": 0, "errors": 0, "note": "backlog drained"}
+            # Pass A (recent-first): embed brand-new records promptly so a new
+            # hospital/rescuer record is face-matched within minutes, not after
+            # the whole backlog drains. Already-embedded ones are skipped below.
+            recent = await _fetch(cl, sb, hdr, order="created_at.desc", limit=25) or []
+            # Pass B (backlog): walk forward from the cursor through old records.
+            backlog = await _fetch(cl, sb, hdr, order="created_at.asc", limit=_BATCH, after=cursor) or []
 
-            # Which of these already have a photos row? (skip re-embedding)
+            # Merge, dedup by id; advance the cursor only from backlog progress.
+            seen_id: set = set()
+            rows = []
+            for row in recent + backlog:
+                if row["id"] not in seen_id:
+                    seen_id.add(row["id"])
+                    rows.append(row)
+            for row in backlog:
+                max_seen = max(max_seen, row["created_at"])
+
+            if not rows:
+                return {"processed": 0, "embedded": 0, "errors": 0, "note": "nothing to do"}
+
             ids = ",".join(f'"{x["id"]}"' for x in rows)
-            pr = await cl.get(
-                f"{sb}/rest/v1/photos",
-                headers=hdr,
-                params={"select": "report_id", "report_id": f"in.({ids})"},
-            )
+            pr = await cl.get(f"{sb}/rest/v1/photos", headers=hdr,
+                              params={"select": "report_id", "report_id": f"in.({ids})"})
             have_photo = {p["report_id"] for p in (pr.json() if pr.status_code == 200 else [])}
 
             for row in rows:
-                max_seen = max(max_seen, row["created_at"])
                 rid = row["id"]
                 foto = _foto_url(row.get("raw_data"), row.get("source", ""))
                 if not foto or rid in have_photo:
@@ -136,7 +151,6 @@ async def run_face_backfill(app: Any) -> dict:
                                  "Prefer": "resolution=ignore-duplicates,return=minimal"},
                         json={"id": str(uuid.uuid4()), "report_id": rid, "storage_path": foto},
                     )
-                    # Embeds the face, stores it, and searches for matches.
                     await process_photo_for_report(rid, foto, app)
                     embedded += 1
                 except Exception as exc:
