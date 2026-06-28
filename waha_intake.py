@@ -339,11 +339,20 @@ async def _waha_send(phone: str, text: str) -> None:
         logger.error("waha_send to %s failed: %s", phone, exc)
 
 
+def _extract_media_url(payload: dict) -> str:
+    """WAHA's media URL location varies by engine/version. NOWEB nests it under
+    payload.media.url; older/other shapes use a flat mediaUrl. Check all."""
+    media = payload.get("media")
+    if isinstance(media, dict) and media.get("url"):
+        return media["url"]
+    return payload.get("mediaUrl") or payload.get("mediaURL") or ""
+
+
 async def _handle_message(payload: dict, app: Any) -> None:
     phone = payload.get("from", "")
     body = (payload.get("body") or "").strip()
-    has_media = payload.get("hasMedia", False)
-    media_url = payload.get("mediaUrl") or ""
+    media_url = _extract_media_url(payload)
+    has_media = payload.get("hasMedia", False) or bool(media_url)
     from_me = payload.get("fromMe", False)
 
     if from_me or not phone:
@@ -356,14 +365,13 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if body:
         _conv_state[phone].append({"role": "user", "content": body})
 
-    # Rewrite WAHA media URL: localhost:3000 → internal hostname
+    # Rewrite WAHA media URL host → internal docker hostname so the API can
+    # reach it. WAHA reports files on its own public host (localhost/127.0.0.1).
     if media_url:
         waha_host = settings.waha_url.rstrip("/")
-        media_url = (
-            media_url
-            .replace("http://localhost:3000", waha_host)
-            .replace("https://localhost:3000", waha_host)
-        )
+        for pub in ("http://localhost:3000", "https://localhost:3000",
+                    "http://127.0.0.1:3000", "https://127.0.0.1:3000"):
+            media_url = media_url.replace(pub, waha_host)
 
     # If photo received (always handle, even if media_url is missing)
     if has_media:

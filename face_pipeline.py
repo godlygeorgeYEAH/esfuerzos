@@ -150,6 +150,7 @@ async def embed_photo_from_url(
     # photos over plain HTTP on the docker network (e.g. http://waha:3000/...).
     # Without this allowance, every WhatsApp photo is rejected (non-HTTPS) and
     # the face pipeline never runs on the bot's primary input channel.
+    is_trusted_internal = False
     try:
         parsed = urllib.parse.urlparse(photo_url)
         host = (parsed.hostname or "").lower()
@@ -171,9 +172,14 @@ async def embed_photo_from_url(
         logger.warning("embed_photo_from_url: URL parse error for %s: %s", photo_url, exc)
         return None
 
+    # WAHA file endpoints require the API key when WAHA_API_KEY is set.
+    download_headers: dict = {}
+    if is_trusted_internal and settings.waha_api_key:
+        download_headers["X-Api-Key"] = settings.waha_api_key
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(photo_url)
+            resp = await client.get(photo_url, headers=download_headers)
             resp.raise_for_status()
             image_bytes = resp.content
     except Exception as exc:
