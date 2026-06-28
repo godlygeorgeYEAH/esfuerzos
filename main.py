@@ -138,7 +138,7 @@ async def health():
         "scrapers": list(getattr(app.state, "scrapers", {}).keys()),
     }
     waha_url = settings.waha_url.rstrip("/")
-    async with httpx.AsyncClient(timeout=5) as cl:
+    async with httpx.AsyncClient(timeout=15) as cl:
         try:
             r = await cl.get(f"{waha_url}/api/sessions")
             results["waha"] = r.status_code < 500
@@ -146,11 +146,11 @@ async def health():
             pass
         try:
             r = await cl.get(
-                f"{settings.supabase_url}/rest/v1/",
+                f"{settings.supabase_url}/rest/v1/reports?limit=0",
                 headers={"Authorization": f"Bearer {settings.supabase_service_role_key}",
                          "apikey": settings.supabase_service_role_key},
             )
-            results["supabase"] = r.status_code < 500
+            results["supabase"] = r.status_code < 400
         except Exception:
             pass
     return {"ok": True, **results}
