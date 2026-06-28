@@ -24,7 +24,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from insightface.app import FaceAnalysis
 from sentence_transformers import SentenceTransformer
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -138,15 +137,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve local photo directories
-for _mount_path, _dir in [
-    ("/sos_images", "/root/sos_images"),
-    ("/crisis_images", "/root/crisis_images"),
-    ("/reconexion_images", "/root/reconexion_images"),
-    ("/venezreporta_images", "/root/venezreporta_images"),
-]:
-    if os.path.isdir(_dir):
-        app.mount(_mount_path, StaticFiles(directory=_dir), name=_mount_path.lstrip("/"))
+# SECURITY (F5/V11): the local photo directories are NOT mounted publicly.
+# They contained crisis-victim face images served unauthenticated, which (with
+# the API exposed) allowed biometric harvesting. The face pipeline downloads
+# images by URL and does not need these mounts. If an authenticated admin viewer
+# is needed later, serve via a token-gated endpoint or Supabase signed URLs.
 
 app.include_router(waha_router)
 
@@ -187,8 +182,7 @@ async def admin_bulk_import(
     x_admin_key: str = Header(default=""),
 ):
     """Trigger batch import of pre-existing data. Requires X-Admin-Key header."""
-    if settings.admin_key and not secrets.compare_digest(x_admin_key, settings.admin_key):
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+    _check_admin(x_admin_key)
     from bulk_importer import run_full_import, import_sos_persons, import_crisis_posts
     if source == "sos_persons":
         background_tasks.add_task(import_sos_persons, app, limit=50000, offset=0, process_faces=True)
@@ -213,11 +207,10 @@ async def admin_consolidate(
     phase=2: text cross-match only
     phase=3: face cross-match only
 
-    Requires X-Admin-Key header when ADMIN_KEY env var is set.
+    Requires X-Admin-Key header. Admin is disabled if ADMIN_KEY is not set.
     Each phase is idempotent and safe to re-run.
     """
-    if settings.admin_key and not secrets.compare_digest(x_admin_key, settings.admin_key):
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+    _check_admin(x_admin_key)
 
     if phase == 1:
         background_tasks.add_task(compute_text_embeddings, app)
@@ -239,7 +232,10 @@ async def admin_consolidate(
 
 
 def _check_admin(x_admin_key: str) -> None:
-    if settings.admin_key and not secrets.compare_digest(x_admin_key, settings.admin_key):
+    # Fail-closed (F2/V2): if no admin key is configured, admin is DISABLED, not open.
+    if not settings.admin_key:
+        raise HTTPException(status_code=503, detail="Admin disabled: ADMIN_KEY not configured")
+    if not secrets.compare_digest(x_admin_key, settings.admin_key):
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 

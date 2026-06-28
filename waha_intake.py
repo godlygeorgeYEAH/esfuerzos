@@ -116,6 +116,11 @@ def _resolve_source_url(source: str, source_url: str | None) -> str | None:
     return None
 
 
+def _hp(phone: str) -> str:
+    """Hashed phone for logs — never log raw phone numbers (PII)."""
+    return "ph_" + hashlib.sha256((phone or "").encode()).hexdigest()[:10]
+
+
 def _format_match_line(m: dict) -> str:
     """Format one candidate: name, age, location [Source] + URL if resolvable."""
     name = m.get("full_name") or "Desconocido"
@@ -327,7 +332,7 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
             content = resp.json()["choices"][0]["message"]["content"]
             result = json.loads(content)
     except Exception as exc:
-        logger.error("LLM call failed for phone %s: %s", phone, exc)
+        logger.error("LLM call failed for phone %s: %s", _hp(phone), exc)
         return {
             "reply": "Hubo un problema procesando tu mensaje. Intenta de nuevo en un momento.",
             "extracted": {"report_ready": False},
@@ -369,6 +374,9 @@ async def _search_existing_matches(name: str, kind: str, exclude_id: str | None 
                 params = {
                     "select": "id,full_name,age,last_seen_location,source,source_url,kind",
                     "full_name": f"ilike.*{token}*",
+                    # F7/V6: never surface other families' PRIVATE WhatsApp reports to
+                    # a stranger. Only public scraped sources are shown as candidates.
+                    "source": "neq.waha_whatsapp",
                     "limit": "15",
                     "order": "created_at.desc",
                 }
@@ -513,7 +521,7 @@ async def _waha_send(phone: str, text: str) -> bool:
                 return False
             return True
     except Exception as exc:
-        logger.error("waha_send to %s failed: %s", phone, exc)
+        logger.error("waha_send to %s failed: %s", _hp(phone), exc)
         return False
 
 
@@ -536,8 +544,8 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if from_me or not phone:
         return
 
-    logger.info("WAHA message from %s: has_media=%s media_url=%s body=%s",
-                phone, has_media, media_url or "None", body[:60])
+    logger.info("WAHA message from %s: has_media=%s media_url=%s body_len=%d",
+                _hp(phone), has_media, media_url or "None", len(body))
 
     # Track message in conversation history
     if body:
@@ -653,7 +661,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
         conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
         report_id = await _upsert_report(phone, extracted, conv_key)
         if report_id:
-            logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
+            logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, _hp(phone))
             await _register_subscriber(report_id, phone, extracted)
             asyncio.create_task(embed_and_match_report(report_id, {
                 "full_name": name,
@@ -698,7 +706,12 @@ async def waha_webhook(request: Request, background_tasks: BackgroundTasks) -> d
     """Receive WAHA message events."""
     raw = await request.body()
 
-    # Optional signature check
+    # F1/V1 — HMAC signature check. When WAHA_WEBHOOK_SECRET is set this is
+    # fail-closed (bad/missing signature → 401). ACTIVATION (ops): set the secret
+    # here AND configure WAHA to HMAC-sign webhooks with the same secret (requires
+    # recreating the WAHA container → QR rescan). Until then the active protection
+    # against external forged webhooks is the host firewall (F3, DOCKER-USER on
+    # :8080), which limits the webhook to the internal docker network (WAHA).
     if settings.waha_webhook_secret:
         sig = request.headers.get("x-waha-signature", "")
         expected = hmac.new(
