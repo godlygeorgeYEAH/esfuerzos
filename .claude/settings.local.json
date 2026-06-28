@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/gerar/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe *)",
+      "Bash(powershell -NonInteractive -Command \"& 'C:\\\\Users\\\\gerar\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe' 'C:\\\\Users\\\\gerar\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-gerar-Documents-Claude-PROJECTS-Re-ne-VE\\\\cd867799-6d6d-474a-a132-6ac2e6ae81d3\\\\scratchpad\\\\vps_fix.py'\" 2>&1)",
+      "Bash(pwsh -NonInteractive -Command \"& 'C:\\\\Users\\\\gerar\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe' 'C:\\\\Users\\\\gerar\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-gerar-Documents-Claude-PROJECTS-Re-ne-VE\\\\cd867799-6d6d-474a-a132-6ac2e6ae81d3\\\\scratchpad\\\\vps_fix.py'\" 2>&1)"
+    ]
+  }
+}

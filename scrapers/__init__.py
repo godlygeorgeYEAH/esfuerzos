@@ -21,7 +21,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 _SOURCES = [
-    ("scrapers.internal_source", "InternalReunionSource"),
     ("scrapers.hospitales_ve",   "HospitalesVESource"),
     # redayuda_ve: full scraper + search (BaseVEScraper + BaseSearchSource, source_name="redayuda_ve")
     # Canonical implementation. red_ayuda.py removed (duplicate, hardcoded key).
