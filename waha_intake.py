@@ -61,6 +61,9 @@ settings = get_settings()
 # In-memory conversation state: phone -> deque of message dicts
 _conv_state: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
 
+# Running accumulated report fields per phone (so the LLM never re-asks).
+_collected: dict[str, dict] = defaultdict(dict)
+
 # Phones we have already sent a proactive (pre-report) match preview to.
 # Prevents spamming the same person on every turn before the form completes.
 _proactive_searched: set[str] = set()
@@ -211,7 +214,14 @@ REGLAS ABSOLUTAS:
 - NUNCA digas que alguien está muerto o falleció. Si hay duda, usa "estado desconocido".
 - NUNCA confirmes una coincidencia. Usa siempre "posible coincidencia, en verificación".
 - Habla en español venezolano, tuteo, tono cálido pero directo.
-- Respuestas cortas (máx 3 líneas en WhatsApp).
+- Respuestas cortas (máx 2 líneas en WhatsApp).
+
+FLUJO DE CONVERSACIÓN (crítico):
+- Te paso "ESTADO ACTUAL" con lo que YA recolectaste. NUNCA vuelvas a preguntar un dato que ya está ahí.
+- Pregunta UN solo dato faltante por mensaje, el más importante primero (nombre → relación/kind → ubicación → edad).
+- En cuanto tengas `kind` + `name`, pon report_ready=true y confirma en una línea. No sigas pidiendo datos opcionales.
+- Si el usuario dice "busco a X" o "a ella/él", eso ya define kind=missing. No preguntes "¿buscas o encontraste?" si ya lo dijo.
+- No repitas la confirmación ni vuelvas a saludar.
 
 Cuando el usuario reporte una persona, extrae estos campos:
   kind: "missing" (busca a alguien) | "found" (encontró a alguien)
@@ -251,10 +261,29 @@ def _sb_headers(key: str) -> dict:
     }
 
 
+_FIELD_LABELS = {
+    "kind": "tipo (busca/encontró)", "name": "nombre", "age": "edad",
+    "gender": "género", "location": "ubicación", "description": "descripción",
+    "contact": "contacto",
+}
+
+
+def _format_state(state: dict) -> str:
+    known = [f"{_FIELD_LABELS.get(k, k)}={v}" for k, v in state.items()
+             if v not in (None, "") and k in _FIELD_LABELS]
+    if not known:
+        return "ESTADO ACTUAL DEL REPORTE: (vacío, aún no hay datos)."
+    return "ESTADO ACTUAL DEL REPORTE (no vuelvas a pedir estos): " + "; ".join(known)
+
+
 async def _llm_extract(phone: str, new_message: str) -> dict:
-    """Call Groq to extract report data and generate reply."""
+    """Call Groq to extract report data and generate reply. Injects the running
+    accumulated state so the LLM never re-asks known fields, and merges the new
+    extraction into that state so downstream always sees the full report."""
     history = list(_conv_state[phone])
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    state = _collected[phone]
+    system = _SYSTEM_PROMPT + "\n\n" + _format_state(state)
+    messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": new_message})
 
@@ -273,13 +302,21 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
-            return json.loads(content)
+            result = json.loads(content)
     except Exception as exc:
         logger.error("LLM call failed for phone %s: %s", phone, exc)
         return {
             "reply": "Hubo un problema procesando tu mensaje. Intenta de nuevo en un momento.",
             "extracted": {"report_ready": False},
         }
+
+    # Merge new non-null fields into the running state; downstream sees the union
+    ext = result.get("extracted") or {}
+    for k, v in ext.items():
+        if k != "report_ready" and v not in (None, ""):
+            _collected[phone][k] = v
+    result["extracted"] = {**_collected[phone], "report_ready": bool(ext.get("report_ready"))}
+    return result
 
 
 async def _search_existing_matches(name: str, kind: str, exclude_id: str | None = None) -> list:
@@ -616,6 +653,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
                 )
             # Reset conversation so the next message starts a fresh report
             _conv_state.pop(phone, None)
+            _collected.pop(phone, None)
             _proactive_searched.discard(phone)
             return
         else:
