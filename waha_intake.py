@@ -280,14 +280,14 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
         }
 
 
-async def _search_existing_matches(name: str, kind: str) -> list:
-    """Recall step: pull opposite-kind reports matching ANY name token (handles
-    inverted order and partial surnames). Broad on purpose — _rank_candidates
-    then scores by full-name similarity + age and drops weak hits. Returns raw
-    candidate rows (caller ranks/dedups)."""
+async def _search_existing_matches(name: str, kind: str, exclude_id: str | None = None) -> list:
+    """Recall step: pull reports (ANY kind) matching ANY name token — handles
+    inverted order and partial surnames. Searches both kinds because the same
+    person may be listed as missing (another searcher) or found (located);
+    missing↔missing is a valid connection. Broad on purpose — _rank_candidates
+    then scores by name similarity + age and drops weak hits."""
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
-    target_kind = "found" if kind == "missing" else "missing"
     # Rank tokens longest-first (surnames/distinctive names beat short given names)
     tokens = sorted({t for t in name.strip().split() if len(t) >= 3}, key=len, reverse=True)
     if not tokens:
@@ -298,16 +298,18 @@ async def _search_existing_matches(name: str, kind: str) -> list:
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
             for token in tokens[:3]:  # up to 3 most distinctive tokens
+                params = {
+                    "select": "id,full_name,age,last_seen_location,source,kind",
+                    "full_name": f"ilike.*{token}*",
+                    "limit": "15",
+                    "order": "created_at.desc",
+                }
+                if exclude_id:
+                    params["id"] = f"neq.{exclude_id}"
                 r = await cl.get(
                     f"{sb}/rest/v1/reports",
                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                    params={
-                        "select": "id,full_name,age,last_seen_location,source",
-                        "kind": f"eq.{target_kind}",
-                        "full_name": f"ilike.*{token}*",
-                        "limit": "15",
-                        "order": "created_at.desc",
-                    },
+                    params=params,
                 )
                 if r.status_code == 200:
                     for row in r.json():
@@ -594,7 +596,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
             # Send the LLM confirmation, then the live DB search result
             if reply:
                 await _waha_send(phone, reply)
-            candidates = await _search_existing_matches(name, kind)
+            candidates = await _search_existing_matches(name, kind, exclude_id=report_id)
             ranked = _rank_candidates(name, extracted.get("age"), candidates)
             unique = _dedup_candidates(ranked, limit=3)
             if unique:
