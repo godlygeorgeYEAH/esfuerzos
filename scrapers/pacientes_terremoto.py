@@ -101,15 +101,6 @@ class PacientesTerremotoVZLAScraper(BaseVEScraper):
 
     def __init__(self) -> None:
         super().__init__()
-        # Shared client reused for all fetches and upserts within this instance.
-        # Eliminates per-record TCP teardown/setup on full_sweep (~4 k rows).
-        # Default timeout=30 covers source API fetches; upsert_report overrides
-        # to 15 s per POST via the per-request timeout parameter.
-        self._http: httpx.AsyncClient = httpx.AsyncClient(timeout=30)
-
-    async def close(self) -> None:
-        """Release the shared HTTP client. Call at application shutdown."""
-        await self._http.aclose()
 
     def _api_headers(self) -> dict[str, str]:
         """HTTP headers for the source Supabase REST API (anon key)."""
@@ -120,14 +111,6 @@ class PacientesTerremotoVZLAScraper(BaseVEScraper):
         }
 
     async def upsert_report(self, data: dict) -> None:
-        """
-        Override base upsert to use ignore-duplicates per project constraint 6.
-        First-seen patient state is preserved; status changes on re-runs are
-        silently ignored. Revert to merge-duplicates if freshness is needed.
-
-        Raises RuntimeError early if SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY
-        are unset, avoiding an opaque httpx connection error on a malformed URL.
-        """
         if not _OWN_SUPABASE_URL or not _OWN_SUPABASE_KEY:
             raise RuntimeError(
                 "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY env vars must be set"
@@ -138,14 +121,14 @@ class PacientesTerremotoVZLAScraper(BaseVEScraper):
             "Content-Type": "application/json",
             "Prefer": "resolution=ignore-duplicates,return=minimal",
         }
-        resp = await self._http.post(
-            f"{_OWN_SUPABASE_URL}/rest/v1/reports",
-            headers=headers,
-            params={"on_conflict": "source,source_url"},
-            json=[data],
-            timeout=15,  # tighter budget for writes vs. source API reads (30 s)
-        )
-        resp.raise_for_status()
+        async with httpx.AsyncClient(timeout=15) as cl:
+            resp = await cl.post(
+                f"{_OWN_SUPABASE_URL}/rest/v1/reports",
+                headers=headers,
+                params={"on_conflict": "source,source_url"},
+                json=[data],
+            )
+            resp.raise_for_status()
 
     @staticmethod
     def _hospital_location(hospital: dict | None) -> str | None:
@@ -255,13 +238,14 @@ class PacientesTerremotoVZLAScraper(BaseVEScraper):
             "offset": offset,
             "order": order,
         }
-        resp = await self._http.get(
-            _PEOPLE_URL,
-            headers=self._api_headers(),
-            params=params,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        async with httpx.AsyncClient(timeout=30) as cl:
+            resp = await cl.get(
+                _PEOPLE_URL,
+                headers=self._api_headers(),
+                params=params,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
     async def poll_recent(self) -> int:
         """

@@ -385,7 +385,6 @@ class SosLaGuairaScraper(BaseScraper):
             if marks and len(marks) > 500:
                 marks = marks[:497] + "..."
 
-            # --- photo_url ---
             foto_url = (raw.get("foto_url") or "").strip() or None
 
             # --- raw_data (no PII: cedula, contacto_nombre, contacto_telefono excluded) ---
@@ -399,6 +398,8 @@ class SosLaGuairaScraper(BaseScraper):
                 "edificio": edificio or None,
                 "piso": piso_str or None,
                 "created_at": raw.get("created_at"),
+                # foto_url stored here; reports table has no photo_url column
+                "foto_url": foto_url,
             }
             # Remove None values to keep raw_data clean, then strip_pii for safety.
             raw_data: dict[str, Any] = strip_pii(
@@ -412,7 +413,6 @@ class SosLaGuairaScraper(BaseScraper):
                 "last_seen_location": location,
                 "distinguishing_marks": marks,
                 "clothing": None,
-                "photo_url": foto_url,
                 "source": _SOURCE_NAME,
                 "source_url": f"sos_laguaira:{record_id}",
                 "raw_data": raw_data,
