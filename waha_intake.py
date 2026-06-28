@@ -154,6 +154,34 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
         }
 
 
+async def _search_existing_matches(name: str, kind: str) -> list:
+    """Quick first-name search in opposite-kind reports. Returns up to 3 rows."""
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    target_kind = "found" if kind == "missing" else "missing"
+    first_name = name.strip().split()[0] if name.strip() else ""
+    if not first_name or len(first_name) < 3:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=8) as cl:
+            r = await cl.get(
+                f"{sb}/rest/v1/reports",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                params={
+                    "select": "id,full_name,age,last_seen_location,source",
+                    "kind": f"eq.{target_kind}",
+                    "full_name": f"ilike.*{first_name}*",
+                    "limit": "3",
+                    "order": "created_at.desc",
+                },
+            )
+            if r.status_code == 200:
+                return r.json()
+    except Exception as exc:
+        logger.error("search_matches: %s", exc)
+    return []
+
+
 async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
@@ -224,6 +252,15 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if body:
         _conv_state[phone].append({"role": "user", "content": body})
 
+    # Rewrite WAHA media URL: localhost:3000 → internal hostname
+    if has_media and media_url:
+        waha_host = settings.waha_url.rstrip("/")  # e.g. http://reune_waha:3000
+        media_url = (
+            media_url
+            .replace("http://localhost:3000", waha_host)
+            .replace("https://localhost:3000", waha_host)
+        )
+
     # If photo received: store and trigger face pipeline
     if has_media and media_url:
         _conv_state[phone].append({"role": "user", "content": f"[envio una foto: {media_url}]"})
@@ -287,16 +324,42 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if extracted.get("report_ready") and extracted.get("name"):
         conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
         report_id = await _upsert_report(phone, extracted, conv_key)
+        kind = extracted.get("kind") or "missing"
+        name = extracted.get("name", "")
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
             report_for_embed = {
-                "full_name": extracted.get("name", ""),
+                "full_name": name,
                 "age": extracted.get("age"),
                 "last_seen_location": extracted.get("location"),
                 "distinguishing_marks": extracted.get("description"),
-                "kind": extracted.get("kind") or "missing",
+                "kind": kind,
             }
             asyncio.create_task(embed_and_match_report(report_id, report_for_embed, app))
+
+            # Search existing base immediately and send result
+            if reply:
+                await _waha_send(phone, reply)
+            candidates = await _search_existing_matches(name, kind)
+            if candidates:
+                lines = []
+                for m in candidates[:3]:
+                    loc = m.get("last_seen_location") or "?"
+                    age = m.get("age") or "?"
+                    lines.append(f"• {m['full_name']}, {age} años, {loc}")
+                match_text = (
+                    f"Busqué en nuestra base y hay posibles coincidencias:\n"
+                    + "\n".join(lines)
+                    + "\nEstos son preliminares — el equipo Reune VE los verificará."
+                )
+                await _waha_send(phone, match_text)
+            else:
+                await _waha_send(
+                    phone,
+                    "Busqué en nuestra base ahora mismo y no hay coincidencias aún. "
+                    "Tu reporte queda activo — seguimos buscando y te avisamos si algo aparece."
+                )
+            return
         else:
             logger.error("Failed to upsert report for phone %s", phone)
 
