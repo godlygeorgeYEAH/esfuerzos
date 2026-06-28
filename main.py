@@ -41,6 +41,8 @@ from consolidation_pipeline import (
     run_full_consolidation,
 )
 from dedup_pipeline import run_dedup_pipeline
+from face_backfill import run_face_backfill
+from notify_pipeline import run_match_notifier
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
 from waha_intake import router as waha_router
 
@@ -96,6 +98,19 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         run_dedup_pipeline, IntervalTrigger(seconds=14400),  # every 4h
         args=[app], id="dedup_pipeline", max_instances=1,
+    )
+
+    # Proactive notifier: WhatsApp the family when a background cross-match
+    # later finds a high-confidence match for their report.
+    scheduler.add_job(
+        run_match_notifier, IntervalTrigger(seconds=600),  # every 10 min
+        args=[app], id="match_notifier", max_instances=1,
+    )
+
+    # Face backfill: embed scraped photos (foto_url) so photo matching has data.
+    scheduler.add_job(
+        run_face_backfill, IntervalTrigger(seconds=600),  # every 10 min, small batches
+        args=[app], id="face_backfill", max_instances=1,
     )
 
     asyncio.create_task(_startup_sweep(scrapers))
