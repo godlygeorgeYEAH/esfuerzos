@@ -246,65 +246,70 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if from_me or not phone:
         return
 
-    logger.info("WAHA message from %s: has_media=%s body=%s", phone, has_media, body[:60])
+    logger.info("WAHA message from %s: has_media=%s media_url=%s body=%s",
+                phone, has_media, media_url or "None", body[:60])
 
     # Track message in conversation history
     if body:
         _conv_state[phone].append({"role": "user", "content": body})
 
     # Rewrite WAHA media URL: localhost:3000 → internal hostname
-    if has_media and media_url:
-        waha_host = settings.waha_url.rstrip("/")  # e.g. http://reune_waha:3000
+    if media_url:
+        waha_host = settings.waha_url.rstrip("/")
         media_url = (
             media_url
             .replace("http://localhost:3000", waha_host)
             .replace("https://localhost:3000", waha_host)
         )
 
-    # If photo received: store and trigger face pipeline
-    if has_media and media_url:
-        _conv_state[phone].append({"role": "user", "content": f"[envio una foto: {media_url}]"})
-        # Find the most recent report for this phone via source_url
-        conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
-        sb = settings.supabase_url.rstrip("/")
-        sb_key = settings.supabase_service_role_key
-        try:
-            async with httpx.AsyncClient(timeout=8) as cl:
-                r = await cl.get(
-                    f"{sb}/rest/v1/reports",
-                    headers={
-                        "apikey": sb_key,
-                        "Authorization": f"Bearer {sb_key}",
-                    },
-                    params={"source_url": f"eq.waha:{conv_key}", "order": "created_at.desc", "limit": "1"},
-                )
-                rows = r.json() if r.status_code == 200 else []
-                if rows:
-                    report_id = rows[0]["id"]
-                    # Upsert photo reference
-                    await cl.post(
-                        f"{sb}/rest/v1/photos",
-                        headers={
-                            "apikey": sb_key,
-                            "Authorization": f"Bearer {sb_key}",
-                            "Content-Type": "application/json",
-                            "Prefer": "resolution=ignore-duplicates,return=minimal",
-                        },
-                        json={"id": str(uuid.uuid4()), "report_id": report_id, "storage_path": media_url},
-                    )
-                    # Trigger face pipeline in background
-                    match_id = await process_photo_for_report(report_id, media_url, app)
-                    if match_id:
-                        await _waha_send(
-                            phone,
-                            "Revisamos la foto. Hay una posible coincidencia, en verificacion. "
-                            "El equipo de Reune VE te contactara para confirmar."
-                        )
-                        return
-        except Exception as exc:
-            logger.error("Photo handling error: %s", exc)
+    # If photo received (always handle, even if media_url is missing)
+    if has_media:
+        _conv_state[phone].append({"role": "user", "content": "[envio una foto]"})
+        face_match_found = False
 
-        await _waha_send(phone, "Foto recibida. La procesaremos junto a tu reporte.")
+        if media_url:
+            conv_key_photo = hashlib.md5(phone.encode()).hexdigest()[:12]
+            sb = settings.supabase_url.rstrip("/")
+            sb_key = settings.supabase_service_role_key
+            try:
+                async with httpx.AsyncClient(timeout=8) as cl:
+                    r = await cl.get(
+                        f"{sb}/rest/v1/reports",
+                        headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+                        params={"source_url": f"eq.waha:{conv_key_photo}", "order": "created_at.desc", "limit": "1"},
+                    )
+                    rows = r.json() if r.status_code == 200 else []
+                    if rows:
+                        report_id = rows[0]["id"]
+                        await cl.post(
+                            f"{sb}/rest/v1/photos",
+                            headers={
+                                "apikey": sb_key,
+                                "Authorization": f"Bearer {sb_key}",
+                                "Content-Type": "application/json",
+                                "Prefer": "resolution=ignore-duplicates,return=minimal",
+                            },
+                            json={"id": str(uuid.uuid4()), "report_id": report_id, "storage_path": media_url},
+                        )
+                        match_id = await process_photo_for_report(report_id, media_url, app)
+                        if match_id:
+                            await _waha_send(
+                                phone,
+                                "Analicé la foto. Hay una posible coincidencia facial, en verificación. "
+                                "El equipo Reune VE te contactará para confirmar."
+                            )
+                            face_match_found = True
+            except Exception as exc:
+                logger.error("Photo handling error: %s", exc)
+
+        if not face_match_found:
+            # Use Groq to give a natural photo response in conversation context
+            photo_prompt = body if body else "El usuario acaba de enviar una foto de la persona que busca."
+            result = await _llm_extract(phone, photo_prompt)
+            photo_reply = result.get("reply", "Foto recibida. ¿Puedes darme más info sobre la persona?")
+            _conv_state[phone].append({"role": "assistant", "content": photo_reply})
+            await _waha_send(phone, photo_reply)
+
         if not body:
             return
 
@@ -342,8 +347,16 @@ async def _handle_message(payload: dict, app: Any) -> None:
                 await _waha_send(phone, reply)
             candidates = await _search_existing_matches(name, kind)
             if candidates:
+                # Deduplicate by normalized name (same person appears in multiple scrapers)
+                seen_names: set = set()
+                unique = []
+                for m in candidates:
+                    norm = re.sub(r'\s+', ' ', (m.get('full_name') or '').lower().strip())
+                    if norm not in seen_names:
+                        seen_names.add(norm)
+                        unique.append(m)
                 lines = []
-                for m in candidates[:3]:
+                for m in unique[:3]:
                     loc = m.get("last_seen_location") or "?"
                     age = m.get("age") or "?"
                     lines.append(f"• {m['full_name']}, {age} años, {loc}")
