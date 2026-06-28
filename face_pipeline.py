@@ -36,9 +36,11 @@ import cv2
 import httpx
 import numpy as np
 
+from config import get_settings
 from embeddings import build_text_for_embedding, get_text_embedding
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # ---------------------------------------------------------------------------
 # Thresholds and constants
@@ -143,19 +145,31 @@ async def embed_photo_from_url(
     Returns None if the download fails, the image cannot be decoded,
     or InsightFace finds no face in the image.
     """
-    # C4: SSRF guard - only HTTPS, no private/loopback IPs
+    # SSRF guard: enforce HTTPS + block private/loopback IPs for EXTERNAL hosts.
+    # The internal WAHA media host is explicitly trusted — it serves WhatsApp
+    # photos over plain HTTP on the docker network (e.g. http://waha:3000/...).
+    # Without this allowance, every WhatsApp photo is rejected (non-HTTPS) and
+    # the face pipeline never runs on the bot's primary input channel.
     try:
         parsed = urllib.parse.urlparse(photo_url)
-        if parsed.scheme != "https":
-            logger.warning("embed_photo_from_url: rejected non-HTTPS URL %s", photo_url)
-            return None
-        host = parsed.hostname or ""
-        addr = ipaddress.ip_address(host)
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            logger.warning("embed_photo_from_url: rejected private IP %s", photo_url)
-            return None
-    except ValueError:
-        pass  # hostname is a domain, not an IP -- allow it
+        host = (parsed.hostname or "").lower()
+        waha_host = (urllib.parse.urlparse(settings.waha_url).hostname or "").lower()
+        is_trusted_internal = bool(host) and host == waha_host
+
+        if not is_trusted_internal:
+            if parsed.scheme != "https":
+                logger.warning("embed_photo_from_url: rejected non-HTTPS URL %s", photo_url)
+                return None
+            try:
+                addr = ipaddress.ip_address(host)
+                if addr.is_private or addr.is_loopback or addr.is_link_local:
+                    logger.warning("embed_photo_from_url: rejected private IP %s", photo_url)
+                    return None
+            except ValueError:
+                pass  # hostname is a domain, not an IP -- allow it
+    except Exception as exc:
+        logger.warning("embed_photo_from_url: URL parse error for %s: %s", photo_url, exc)
+        return None
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:

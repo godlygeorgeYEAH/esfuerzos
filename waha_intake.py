@@ -54,9 +54,67 @@ settings = get_settings()
 # In-memory conversation state: phone -> deque of message dicts
 _conv_state: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
 
+# Phones we have already sent a proactive (pre-report) match preview to.
+# Prevents spamming the same person on every turn before the form completes.
+_proactive_searched: set[str] = set()
+
 # Deduplication: msg_id -> timestamp. Clears entries older than 60s.
 _seen_msg_ids: dict[str, float] = {}
 _DEDUP_TTL = 60.0
+
+# Human-readable labels for each scraper source. Shown to families so a match
+# result reads "via Venezuela Reporta" instead of the raw "venezreporta" token.
+SOURCE_LABELS: dict[str, str] = {
+    "sos_laguaira": "SOS La Guaira",
+    "venezreporta": "Venezuela Reporta",
+    "sos_venezuela": "SOS Venezuela",
+    "terremotove": "TerremotoVE",
+    "pacientes_terremoto": "Pacientes en Hospitales",
+    "localizados_venezuela": "Localizados Venezuela",
+    "venezuela_te_busca": "Venezuela Te Busca",
+    "reconexion": "Reconexión",
+    "google_drive_hospital": "Directorio Hospitalario",
+    "red_solidaria_venezuela": "Red Solidaria Venezuela",
+    "hospitales_ve": "Hospitales VE",
+    "redayuda_ve": "Red Ayuda VE",
+    "tuayudave": "Tu Ayuda VE",
+    "waha_whatsapp": "Reúne VE (WhatsApp)",
+}
+
+
+def _source_label(source: str) -> str:
+    """Map a raw source token to a human-readable label."""
+    return SOURCE_LABELS.get(source, source or "fuente externa")
+
+
+def _format_match_line(m: dict) -> str:
+    """Format one candidate as a WhatsApp bullet: name, age, location [Source]."""
+    name = m.get("full_name") or "Desconocido"
+    age = m.get("age") or "?"
+    loc = m.get("last_seen_location") or "ubicación por confirmar"
+    label = _source_label(m.get("source", ""))
+    return f"• {name}, {age} años — {loc} [{label}]"
+
+
+def _dedup_candidates(rows: list, limit: int = 3) -> list:
+    """Collapse rows that are the same person (first OR last name token + location)."""
+    seen_keys: set[str] = set()
+    unique: list = []
+    for m in rows:
+        tokens = (m.get("full_name") or "").lower().split()
+        loc_tok = re.sub(r"\s+", "", (m.get("last_seen_location") or "").lower())[:30]
+        first_tok = tokens[0] if tokens else ""
+        last_tok = tokens[-1] if tokens else ""
+        key_first = f"{first_tok}|{loc_tok}"
+        key_last = f"{last_tok}|{loc_tok}"
+        if key_first in seen_keys or key_last in seen_keys:
+            continue
+        seen_keys.add(key_first)
+        seen_keys.add(key_last)
+        unique.append(m)
+        if len(unique) >= limit:
+            break
+    return unique
 
 
 def _is_duplicate(msg_id: str) -> bool:
@@ -155,31 +213,76 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
 
 
 async def _search_existing_matches(name: str, kind: str) -> list:
-    """Quick first-name search in opposite-kind reports. Returns up to 3 rows."""
+    """Search opposite-kind reports by each name token (handles inverted name
+    order, e.g. 'Arantza Vergara' vs hospital list 'Vergara Arantza').
+    Returns up to 8 deduplicated-by-id rows; caller collapses to 3 persons."""
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
     target_kind = "found" if kind == "missing" else "missing"
-    first_name = name.strip().split()[0] if name.strip() else ""
-    if not first_name or len(first_name) < 3:
+    tokens = [t for t in name.strip().split() if len(t) >= 3]
+    if not tokens:
         return []
+
+    seen_ids: set = set()
+    results: list = []
     try:
         async with httpx.AsyncClient(timeout=8) as cl:
-            r = await cl.get(
-                f"{sb}/rest/v1/reports",
-                headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                params={
-                    "select": "id,full_name,age,last_seen_location,source",
-                    "kind": f"eq.{target_kind}",
-                    "full_name": f"ilike.*{first_name}*",
-                    "limit": "3",
-                    "order": "created_at.desc",
-                },
-            )
-            if r.status_code == 200:
-                return r.json()
+            for token in tokens[:2]:  # first + last name, skip middle names
+                r = await cl.get(
+                    f"{sb}/rest/v1/reports",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                    params={
+                        "select": "id,full_name,age,last_seen_location,source",
+                        "kind": f"eq.{target_kind}",
+                        "full_name": f"ilike.*{token}*",
+                        "limit": "5",
+                        "order": "created_at.desc",
+                    },
+                )
+                if r.status_code == 200:
+                    for row in r.json():
+                        if row["id"] not in seen_ids:
+                            seen_ids.add(row["id"])
+                            results.append(row)
+                if len(results) >= 8:
+                    break
     except Exception as exc:
         logger.error("search_matches: %s", exc)
-    return []
+    return results[:8]
+
+
+async def _lookup_match_details(match_id: str, source_report_id: str) -> tuple:
+    """Given a face match_id, return (name, location, source) of the OTHER
+    report in the match (the matched person, not the one who sent the photo).
+    Returns (None, None, None) on any failure."""
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
+    try:
+        async with httpx.AsyncClient(timeout=6) as cl:
+            mr = await cl.get(
+                f"{sb}/rest/v1/matches",
+                headers=hdr,
+                params={"id": f"eq.{match_id}", "select": "missing_id,found_id"},
+            )
+            if mr.status_code != 200 or not mr.json():
+                return (None, None, None)
+            row = mr.json()[0]
+            # The matched person is whichever side is not the photo sender's report
+            other_id = row["found_id"] if row.get("missing_id") == source_report_id else row["missing_id"]
+            if not other_id:
+                return (None, None, None)
+            rr = await cl.get(
+                f"{sb}/rest/v1/reports",
+                headers=hdr,
+                params={"id": f"eq.{other_id}", "select": "full_name,last_seen_location,source"},
+            )
+            if rr.status_code == 200 and rr.json():
+                rep = rr.json()[0]
+                return (rep.get("full_name"), rep.get("last_seen_location"), rep.get("source"))
+    except Exception as exc:
+        logger.warning("lookup_match_details failed: %s", exc)
+    return (None, None, None)
 
 
 async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
@@ -293,11 +396,27 @@ async def _handle_message(payload: dict, app: Any) -> None:
                         )
                         match_id = await process_photo_for_report(report_id, media_url, app)
                         if match_id:
-                            await _waha_send(
-                                phone,
-                                "Analicé la foto. Hay una posible coincidencia facial, en verificación. "
-                                "El equipo Reune VE te contactará para confirmar."
-                            )
+                            found_name_hint, found_loc_hint, found_src_hint = \
+                                await _lookup_match_details(match_id, report_id)
+                            if found_loc_hint:
+                                src_txt = f" (via {_source_label(found_src_hint)})" if found_src_hint else ""
+                                face_reply = (
+                                    f"Analicé la foto. Hay una posible coincidencia facial: "
+                                    f"*{found_name_hint or 'persona registrada'}*, ubicación: "
+                                    f"*{found_loc_hint}*{src_txt}. Reúne VE verificará y te contactará."
+                                )
+                            elif found_name_hint:
+                                face_reply = (
+                                    f"Analicé la foto. Hay una posible coincidencia facial: "
+                                    f"*{found_name_hint}*, ubicación por confirmar. "
+                                    "Reúne VE verificará y te contactará."
+                                )
+                            else:
+                                face_reply = (
+                                    "Analicé la foto. Hay una posible coincidencia facial en verificación. "
+                                    "Reúne VE confirmará la ubicación y te contactará."
+                                )
+                            await _waha_send(phone, face_reply)
                             face_match_found = True
             except Exception as exc:
                 logger.error("Photo handling error: %s", exc)
@@ -342,32 +461,16 @@ async def _handle_message(payload: dict, app: Any) -> None:
             }
             asyncio.create_task(embed_and_match_report(report_id, report_for_embed, app))
 
-            # Search existing base immediately and send result
+            # Send the LLM confirmation, then the live DB search result
             if reply:
                 await _waha_send(phone, reply)
             candidates = await _search_existing_matches(name, kind)
-            if candidates:
-                # Deduplicate: same person entered with different name variants at same location
-                seen_keys: set = set()
-                unique = []
-                for m in candidates:
-                    name_tok = (m.get('full_name') or '').lower().split()
-                    # key = first name token + location (catches "Vergara Arantza" vs "Arantza Vergara" at same site)
-                    first_tok = name_tok[0] if name_tok else ""
-                    loc_tok = re.sub(r'\s+', '', (m.get('last_seen_location') or '').lower())
-                    dedup_key = f"{first_tok}|{loc_tok}"
-                    if dedup_key not in seen_keys:
-                        seen_keys.add(dedup_key)
-                        unique.append(m)
-                lines = []
-                for m in unique[:3]:
-                    loc = m.get("last_seen_location") or "?"
-                    age = m.get("age") or "?"
-                    lines.append(f"• {m['full_name']}, {age} años, {loc}")
+            unique = _dedup_candidates(candidates, limit=3)
+            if unique:
                 match_text = (
-                    f"Busqué en nuestra base y hay posibles coincidencias:\n"
-                    + "\n".join(lines)
-                    + "\nEstos son preliminares — el equipo Reune VE los verificará."
+                    "Busqué en nuestra base y hay posibles coincidencias:\n"
+                    + "\n".join(_format_match_line(m) for m in unique)
+                    + "\nSon preliminares — el equipo Reúne VE los verificará."
                 )
                 await _waha_send(phone, match_text)
             else:
@@ -376,9 +479,31 @@ async def _handle_message(payload: dict, app: Any) -> None:
                     "Busqué en nuestra base ahora mismo y no hay coincidencias aún. "
                     "Tu reporte queda activo — seguimos buscando y te avisamos si algo aparece."
                 )
+            # Reset conversation so the next message starts a fresh report
+            _conv_state.pop(phone, None)
+            _proactive_searched.discard(phone)
             return
         else:
             logger.error("Failed to upsert report for phone %s", phone)
+
+    # Proactive search: a name was detected but the report isn't complete yet.
+    # Fire once per phone so a panicked user gets an early preview without spam.
+    extracted_name = (extracted.get("name") or "").strip()
+    if extracted_name and len(extracted_name) >= 3 and phone not in _proactive_searched:
+        _proactive_searched.add(phone)  # mark before await so it can't double-fire
+        prov_kind = extracted.get("kind") or "missing"
+        prov_candidates = await _search_existing_matches(extracted_name, prov_kind)
+        prov_unique = _dedup_candidates(prov_candidates, limit=3)
+        if prov_unique:
+            if reply:
+                await _waha_send(phone, reply)
+            await _waha_send(
+                phone,
+                "Mientras registramos el reporte, encontré esto en nuestra base:\n"
+                + "\n".join(_format_match_line(m) for m in prov_unique)
+                + "\n¿Es alguna de estas personas?"
+            )
+            return
 
     if reply:
         await _waha_send(phone, reply)
