@@ -40,7 +40,8 @@ except ImportError:  # pragma: no cover - dep is pinned, guard is defensive
     logger.warning("rapidfuzz not installed — dedup pipeline disabled")
 
 # Tuning
-_FETCH_LIMIT = 5000          # most recently created rows scanned per run
+_PAGE_SIZE = 1000            # PostgREST default max rows per request
+_MAX_PAGES = 70              # cover up to 70k rows per run (whole table)
 _FUZZ_THRESHOLD = 85.0       # WRatio >= this == same person
 _LOC_PREFIX = 30             # chars of normalized location used for bucketing
 _PATCH_CONCURRENCY = 8       # max simultaneous PATCH calls
@@ -70,18 +71,27 @@ def _sb_headers(key: str, prefer: str = "") -> dict:
 
 
 async def _fetch_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[dict]:
-    r = await client.get(
-        f"{sb}/rest/v1/reports",
-        headers=_sb_headers(key),
-        params={
-            "select": "id,full_name,age,last_seen_location,kind,source_url,raw_data,created_at",
-            "full_name": "not.is.null",
-            "limit": str(_FETCH_LIMIT),
-            "order": "created_at.desc",
-        },
-    )
-    r.raise_for_status()
-    return r.json() or []
+    """Paginate the whole reports table (PostgREST caps each request at ~1000)."""
+    rows: list[dict] = []
+    for page in range(_MAX_PAGES):
+        offset = page * _PAGE_SIZE
+        r = await client.get(
+            f"{sb}/rest/v1/reports",
+            headers=_sb_headers(key),
+            params={
+                "select": "id,full_name,age,last_seen_location,kind,source_url,raw_data,created_at",
+                "full_name": "not.is.null",
+                "limit": str(_PAGE_SIZE),
+                "offset": str(offset),
+                "order": "created_at.desc",
+            },
+        )
+        r.raise_for_status()
+        batch = r.json() or []
+        rows.extend(batch)
+        if len(batch) < _PAGE_SIZE:
+            break
+    return rows
 
 
 def _cluster(rows: list[dict]) -> list[tuple[dict, list[dict]]]:
