@@ -46,6 +46,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from config import get_settings
 from consolidation_pipeline import embed_and_match_report
 from face_pipeline import process_photo_for_report
+from scrapers.base import age_match_score
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -117,6 +118,60 @@ def _dedup_candidates(rows: list, limit: int = 3) -> list:
     return unique
 
 
+try:
+    from rapidfuzz import fuzz as _fuzz
+    _HAS_FUZZ = True
+except ImportError:  # pragma: no cover
+    _HAS_FUZZ = False
+
+# A candidate must clear this NAME score before age is even considered. WRatio is
+# too lenient (a single shared first name scores ~0.9), so we use token overlap +
+# token-sort ratio: this rejects 'Ramirez Arantza' for 'Arantza Bastidas Dias'
+# while keeping partial DB records like 'Arantza Bastidas'.
+_NAME_FLOOR = 0.60
+
+
+def _name_score(query: str, cand: str) -> float:
+    """0..1 name similarity that requires real token overlap, not just one
+    shared given name. Blends bidirectional token overlap with token-sort ratio."""
+    qt = [t for t in query.lower().split() if len(t) >= 3]
+    ct = [t for t in cand.lower().split() if len(t) >= 3]
+    if not qt or not ct:
+        return 0.0
+    if not _HAS_FUZZ:
+        # Degraded: exact-token overlap fraction over the smaller name
+        matched = sum(1 for t in qt if t in ct)
+        return matched / min(len(qt), len(ct))
+    matched = sum(1 for t in qt if any(_fuzz.ratio(t, u) >= 85 for u in ct))
+    overlap = matched / min(len(qt), len(ct))          # fraction of smaller name matched
+    tsr = _fuzz.token_sort_ratio(query, cand) / 100.0  # whole-string, order-insensitive
+    return 0.6 * overlap + 0.4 * tsr
+
+
+def _rank_candidates(query_name: str, query_age, rows: list) -> list:
+    """Drop candidates whose name doesn't really match, then rank survivors by
+    name (dominant) + age proximity. Fixes 'Arantza Bastidas Dias' surfacing an
+    unrelated 'Ramirez Arantza'."""
+    try:
+        q_age = int(str(query_age).strip()) if query_age not in (None, "") else None
+    except (ValueError, TypeError):
+        q_age = None
+
+    scored: list[tuple[float, dict]] = []
+    for m in rows:
+        cand_name = m.get("full_name") or ""
+        if not cand_name:
+            continue
+        ns = _name_score(query_name, cand_name)
+        if ns < _NAME_FLOOR:
+            continue
+        ag = age_match_score(q_age, m.get("age"))        # 0..1, 0.5 if unknown
+        score = 0.8 * ns + 0.2 * ag
+        scored.append((score, {**m, "_score": round(score, 3)}))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [m for _, m in scored]
+
+
 def _is_duplicate(msg_id: str) -> bool:
     now = time.monotonic()
     # Purge old entries
@@ -147,8 +202,9 @@ REGLAS ABSOLUTAS:
 
 Cuando el usuario reporte una persona, extrae estos campos:
   kind: "missing" (busca a alguien) | "found" (encontró a alguien)
-  name: nombre completo
-  age: edad aproximada (número o rango)
+  name: nombre completo (incluye TODOS los apellidos que mencione)
+  age: edad aproximada (solo el número)
+  gender: "F" (femenino) | "M" (masculino) | null si no se sabe. Infiere del nombre/pronombres si es claro (ej. "a ella", "mi hija" → F).
   location: último lugar visto / lugar donde fue encontrado
   description: marcas, ropa, características
   contact: teléfono o forma de contacto del reportante
@@ -162,6 +218,7 @@ Responde SIEMPRE en este JSON (no incluyas nada más):
     "kind": null,
     "name": null,
     "age": null,
+    "gender": null,
     "location": null,
     "description": null,
     "contact": null,
@@ -213,21 +270,23 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
 
 
 async def _search_existing_matches(name: str, kind: str) -> list:
-    """Search opposite-kind reports by each name token (handles inverted name
-    order, e.g. 'Arantza Vergara' vs hospital list 'Vergara Arantza').
-    Returns up to 8 deduplicated-by-id rows; caller collapses to 3 persons."""
+    """Recall step: pull opposite-kind reports matching ANY name token (handles
+    inverted order and partial surnames). Broad on purpose — _rank_candidates
+    then scores by full-name similarity + age and drops weak hits. Returns raw
+    candidate rows (caller ranks/dedups)."""
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
     target_kind = "found" if kind == "missing" else "missing"
-    tokens = [t for t in name.strip().split() if len(t) >= 3]
+    # Rank tokens longest-first (surnames/distinctive names beat short given names)
+    tokens = sorted({t for t in name.strip().split() if len(t) >= 3}, key=len, reverse=True)
     if not tokens:
         return []
 
     seen_ids: set = set()
     results: list = []
     try:
-        async with httpx.AsyncClient(timeout=8) as cl:
-            for token in tokens[:2]:  # first + last name, skip middle names
+        async with httpx.AsyncClient(timeout=10) as cl:
+            for token in tokens[:3]:  # up to 3 most distinctive tokens
                 r = await cl.get(
                     f"{sb}/rest/v1/reports",
                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
@@ -235,7 +294,7 @@ async def _search_existing_matches(name: str, kind: str) -> list:
                         "select": "id,full_name,age,last_seen_location,source",
                         "kind": f"eq.{target_kind}",
                         "full_name": f"ilike.*{token}*",
-                        "limit": "5",
+                        "limit": "15",
                         "order": "created_at.desc",
                     },
                 )
@@ -244,11 +303,11 @@ async def _search_existing_matches(name: str, kind: str) -> list:
                         if row["id"] not in seen_ids:
                             seen_ids.add(row["id"])
                             results.append(row)
-                if len(results) >= 8:
+                if len(results) >= 40:
                     break
     except Exception as exc:
         logger.error("search_matches: %s", exc)
-    return results[:8]
+    return results[:40]
 
 
 async def _lookup_match_details(match_id: str, source_report_id: str) -> tuple:
@@ -319,7 +378,38 @@ async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
     return None
 
 
-async def _waha_send(phone: str, text: str) -> None:
+async def _register_subscriber(report_id: str, phone: str, data: dict) -> None:
+    """Map this report_id to the reporter's phone so a background match found
+    later can notify them. Upsert on report_id (one row per phone/report)."""
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    row = {
+        "report_id": report_id,
+        "phone": phone,
+        "full_name": (data.get("name") or "").strip() or None,
+        "kind": data.get("kind") or "missing",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8) as cl:
+            resp = await cl.post(
+                f"{sb}/rest/v1/bot_subscribers",
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                json=row,
+                params={"on_conflict": "report_id"},
+            )
+            if resp.status_code not in (200, 201, 204):
+                logger.warning("register_subscriber %d: %s", resp.status_code, resp.text[:120])
+    except Exception as exc:
+        logger.warning("register_subscriber failed: %s", exc)
+
+
+async def _waha_send(phone: str, text: str) -> bool:
+    """Send a WhatsApp text via WAHA. Returns True on success, False otherwise."""
     waha = settings.waha_url.rstrip("/")
     chat_id = phone if "@" in phone else f"{phone}@c.us"
     payload = {
@@ -335,8 +425,11 @@ async def _waha_send(phone: str, text: str) -> None:
             resp = await cl.post(f"{waha}/api/sendText", json=payload, headers=headers)
             if resp.status_code not in (200, 201):
                 logger.warning("waha_send %d: %s", resp.status_code, resp.text[:100])
+                return False
+            return True
     except Exception as exc:
         logger.error("waha_send to %s failed: %s", phone, exc)
+        return False
 
 
 def _extract_media_url(payload: dict) -> str:
@@ -377,6 +470,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if has_media:
         _conv_state[phone].append({"role": "user", "content": "[envio una foto]"})
         face_match_found = False
+        photo_analyzed = False
 
         if media_url:
             conv_key_photo = hashlib.md5(phone.encode()).hexdigest()[:12]
@@ -402,6 +496,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
                             },
                             json={"id": str(uuid.uuid4()), "report_id": report_id, "storage_path": media_url},
                         )
+                        photo_analyzed = True
                         match_id = await process_photo_for_report(report_id, media_url, app)
                         if match_id:
                             found_name_hint, found_loc_hint, found_src_hint = \
@@ -430,12 +525,26 @@ async def _handle_message(payload: dict, app: Any) -> None:
                 logger.error("Photo handling error: %s", exc)
 
         if not face_match_found:
-            # Use Groq to give a natural photo response in conversation context
-            photo_prompt = body if body else "El usuario acaba de enviar una foto de la persona que busca."
-            result = await _llm_extract(phone, photo_prompt)
-            photo_reply = result.get("reply", "Foto recibida. ¿Puedes darme más info sobre la persona?")
-            _conv_state[phone].append({"role": "assistant", "content": photo_reply})
-            await _waha_send(phone, photo_reply)
+            if photo_analyzed:
+                # Photo ran through face recognition but matched nothing yet.
+                # Say so explicitly — otherwise it looks like nothing happened.
+                msg = (
+                    "Analicé la foto con reconocimiento facial y la guardé. "
+                    "Por ahora no hay coincidencias visuales, pero la comparo "
+                    "automáticamente con cada nuevo registro y te aviso si aparece."
+                )
+                _conv_state[phone].append({"role": "assistant", "content": msg})
+                await _waha_send(phone, msg)
+            else:
+                # No report yet / couldn't fetch media — guide the user with Groq.
+                photo_prompt = body if body else (
+                    "El usuario envió una foto pero aún no hay un reporte. "
+                    "Pídele de forma cálida el nombre y datos de la persona para poder buscarla."
+                )
+                result = await _llm_extract(phone, photo_prompt)
+                photo_reply = result.get("reply", "Recibí la foto. Para buscar, dime el nombre de la persona.")
+                _conv_state[phone].append({"role": "assistant", "content": photo_reply})
+                await _waha_send(phone, photo_reply)
 
         if not body:
             return
@@ -460,6 +569,8 @@ async def _handle_message(payload: dict, app: Any) -> None:
         name = extracted.get("name", "")
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, phone)
+            # Register phone↔report so a background match found later can notify them
+            await _register_subscriber(report_id, phone, extracted)
             report_for_embed = {
                 "full_name": name,
                 "age": extracted.get("age"),
@@ -473,7 +584,8 @@ async def _handle_message(payload: dict, app: Any) -> None:
             if reply:
                 await _waha_send(phone, reply)
             candidates = await _search_existing_matches(name, kind)
-            unique = _dedup_candidates(candidates, limit=3)
+            ranked = _rank_candidates(name, extracted.get("age"), candidates)
+            unique = _dedup_candidates(ranked, limit=3)
             if unique:
                 match_text = (
                     "Busqué en nuestra base y hay posibles coincidencias:\n"
@@ -501,7 +613,8 @@ async def _handle_message(payload: dict, app: Any) -> None:
         _proactive_searched.add(phone)  # mark before await so it can't double-fire
         prov_kind = extracted.get("kind") or "missing"
         prov_candidates = await _search_existing_matches(extracted_name, prov_kind)
-        prov_unique = _dedup_candidates(prov_candidates, limit=3)
+        prov_ranked = _rank_candidates(extracted_name, extracted.get("age"), prov_candidates)
+        prov_unique = _dedup_candidates(prov_ranked, limit=3)
         if prov_unique:
             if reply:
                 await _waha_send(phone, reply)
