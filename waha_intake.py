@@ -842,16 +842,16 @@ async def waha_webhook(request: Request, background_tasks: BackgroundTasks) -> d
     """Receive WAHA message events."""
     raw = await request.body()
 
-    # F1/V1 — HMAC signature check. When WAHA_WEBHOOK_SECRET is set this is
-    # fail-closed (bad/missing signature → 401). ACTIVATION (ops): set the secret
-    # here AND configure WAHA to HMAC-sign webhooks with the same secret (requires
-    # recreating the WAHA container → QR rescan). Until then the active protection
-    # against external forged webhooks is the host firewall (F3, DOCKER-USER on
-    # :8080), which limits the webhook to the internal docker network (WAHA).
+    # B5/F1/V1 — WAHA webhook HMAC. WAHA signs the RAW body with HMAC-SHA512 (hex)
+    # and sends it in the X-Webhook-Hmac header (algorithm always sha512). When
+    # WAHA_WEBHOOK_SECRET is set this is fail-closed (bad/missing signature → 401).
+    # Activation: set WAHA_WEBHOOK_SECRET here AND WHATSAPP_HOOK_HMAC_KEY (same
+    # value) on the WAHA container. Until set, the host firewall (F3) is the active
+    # protection (webhook reachable only from the internal docker network).
     if settings.waha_webhook_secret:
-        sig = request.headers.get("x-waha-signature", "")
+        sig = request.headers.get("x-webhook-hmac", "")
         expected = hmac.new(
-            settings.waha_webhook_secret.encode(), raw, hashlib.sha256
+            settings.waha_webhook_secret.encode(), raw, hashlib.sha512
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status_code=401, detail="Invalid WAHA signature")
