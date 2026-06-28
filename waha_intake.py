@@ -38,6 +38,7 @@ import re
 import time
 import uuid
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -158,7 +159,8 @@ async def _save_session(phone: str) -> bool:
                          "Content-Type": "application/json",
                          "Prefer": "resolution=merge-duplicates,return=minimal"},
                 params={"on_conflict": "phone"},
-                json={"phone": phone, "state": st, "updated_at": "now()"},
+                json={"phone": phone, "state": st,
+                      "updated_at": datetime.now(timezone.utc).isoformat()},
             )
             if resp.status_code in (200, 201, 204):
                 return True
