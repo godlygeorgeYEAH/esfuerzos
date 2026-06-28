@@ -1,6 +1,30 @@
 # Reúne VE — Release-Readiness Audit Verdict (2026-06-28)
 
-## VERDICT: 🔴 NO-GO for public release · Score 58/100 (gate 95)
+## CURRENT VERDICT: 🟡 NO-GO · Score 79/100 (gate 95) — up from 58/100 after P0 fixes
+
+### Closed + verified (P0 catastrophic items):
+- V4 RLS anon-read CLOSED (migration 012 applied; RLS=true, no anon policy).
+- Admin fail-closed + ADMIN_KEY set (403 no-key / 200 with-key).
+- Public photo StaticFiles mounts removed (404). Phone hashed in logs.
+- F7 on BOTH text and face paths (private waha_whatsapp never disclosed to strangers).
+- Sync face disclosure gated at face_score>=0.65 + public source only.
+- Unidentified-found registrable (placeholder name). Per-report key (no overwrite).
+- Notifier reactivated (human-confirmed only). Firewall persistent (systemd unit).
+- E2E suite 22/22 (live, in-container).
+
+### Remaining BLOCKERS to reach 95 (availability/correctness/ops):
+- B1: rate limiter per-IP → collapses to global 60/min on the webhook (surge killer). Make per-phone.
+- B2: photo+caption first message drops the photo (media handled before report creation). Reorder.
+- B3/B4: in-memory state — restart loss + unbounded growth/OOM. Persist to Supabase (waha_sessions) + eviction.
+- B5: WAHA HMAC inert + default 'testingapikey'. Activate HMAC (QR rescan) + rotate key.
+- B6: branch audit-fixes-2026-06 NOT merged to main; prod runs SFTP-diverged code. Merge + clean deploy + verify image==commit.
+- Should-fix: reconcile migrations/ to live schema; LLM output safety guard; similar-name collision (<0.4); SSRF DNS bypass; CI.
+
+Re-score only after B1-B6 land and an extended suite (RLS denial, notifier gate, photo-caption, restart) is green.
+
+---
+
+## (Original) VERDICT: 🔴 NO-GO · Score 58/100 — superseded by the 79/100 re-score above
 
 A 4-phase audit (deep-audit → security-review → E2E simulation → scored verdict)
 with an independent qa-scorer gate. The bot must NOT be released to the public
