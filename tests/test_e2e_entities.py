@@ -55,15 +55,14 @@ _TEST_PREFIX = "e2eaudit"
 _created_source_urls: set[str] = set()
 
 
-def _conv_key(phone: str) -> str:
-    return hashlib.md5(phone.encode()).hexdigest()[:12]
-
-
 async def _db_report(phone: str) -> dict | None:
-    su = f"waha:{_conv_key(phone)}"
+    # P0-b: report key is per-report (in-memory W._report_keys), not md5(phone).
+    rk = W._report_keys.get(phone)
+    if not rk:
+        return None
     async with httpx.AsyncClient(timeout=15) as cl:
         r = await cl.get(f"{SB}/rest/v1/reports", headers=H,
-                         params={"source_url": f"eq.{su}",
+                         params={"source_url": f"eq.waha:{rk}",
                                  "select": "id,full_name,kind,age,last_seen_location",
                                  "limit": "1"})
         rows = r.json() if r.status_code == 200 else []
@@ -76,13 +75,16 @@ async def _run(phone: str, msgs: list[str], media_url: str | None = None) -> lis
     W._conv_state.pop(phone, None)
     W._collected.pop(phone, None)
     W._searched_shown.discard(phone)
-    _created_source_urls.add(f"waha:{_conv_key(phone)}")
+    W._report_keys.pop(phone, None)
     for i, m in enumerate(msgs):
         payload = {"from": phone, "body": m, "hasMedia": bool(media_url and i == len(msgs) - 1),
                    "id": f"{_TEST_PREFIX}_{uuid.uuid4()}"}
         if media_url and i == len(msgs) - 1:
             payload["media"] = {"url": media_url}
         await W._handle_message(payload, _APP)
+    rk = W._report_keys.get(phone)
+    if rk:
+        _created_source_urls.add(f"waha:{rk}")
     return list(_REPLIES)
 
 

@@ -64,6 +64,15 @@ _conv_state: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
 # Running accumulated report fields per phone (so the LLM never re-asks).
 _collected: dict[str, dict] = defaultdict(dict)
 
+# Per-REPORT dedup key (P0-b): a phone can report several people. Each active
+# report gets a unique source_url so a second person does NOT overwrite the first.
+# Rotated when a new person is detected (see _llm_extract reset).
+_report_keys: dict[str, str] = {}
+
+# Placeholder name for a FOUND person whose name is unknown (P0-a): rescuers /
+# hospitals reporting unconscious/unidentified people — the highest-value case.
+_UNIDENTIFIED = "No identificado"
+
 # Phones we have already shown DB match results to (search once per report, not
 # every turn). Cleared when the user starts reporting a different person.
 _searched_shown: set[str] = set()
@@ -119,6 +128,14 @@ def _resolve_source_url(source: str, source_url: str | None) -> str | None:
 def _hp(phone: str) -> str:
     """Hashed phone for logs — never log raw phone numbers (PII)."""
     return "ph_" + hashlib.sha256((phone or "").encode()).hexdigest()[:10]
+
+
+def _report_key(phone: str) -> str:
+    """Per-report dedup key (P0-b). Stable during one person's intake, unique per
+    person, so one phone can report multiple relatives without overwriting."""
+    if phone not in _report_keys:
+        _report_keys[phone] = f"{hashlib.md5(phone.encode()).hexdigest()[:8]}:{uuid.uuid4().hex[:8]}"
+    return _report_keys[phone]
 
 
 def _format_match_line(m: dict) -> str:
@@ -248,6 +265,7 @@ FLUJO DE CONVERSACIÓN (crítico):
 - Te paso "ESTADO ACTUAL" con lo que YA recolectaste. NUNCA vuelvas a preguntar un dato que ya está ahí.
 - Pregunta UN solo dato faltante por mensaje, el más importante primero (nombre → relación/kind → ubicación → edad).
 - En cuanto tengas `kind` + `name`, pon report_ready=true y confirma en una línea. No sigas pidiendo datos opcionales.
+- PERSONA ENCONTRADA SIN NOMBRE (ej. "un señor sin identificar", "paciente no identificada"): NO insistas en el nombre. Deja name vacío, pide ubicación y descripción (o foto), y con kind="found" + (ubicación o descripción) pon report_ready=true.
 - Si el usuario dice "busco a X" o "a ella/él", eso ya define kind=missing. No preguntes "¿buscas o encontraste?" si ya lo dijo.
 - No repitas la confirmación ni vuelvas a saludar.
 
@@ -277,7 +295,7 @@ Responde SIEMPRE en este JSON (no incluyas nada más):
   }
 }
 
-`report_ready` = true cuando tienes kind + name confirmados por el usuario."""
+`report_ready` = true cuando tienes kind + name; O cuando kind="found" + ubicación/descripción aunque no haya nombre (persona no identificada)."""
 
 
 def _sb_headers(key: str) -> dict:
@@ -346,6 +364,7 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
     if new_name and cur_name and _name_score(new_name, cur_name) < 0.4:
         _collected[phone].clear()
         _searched_shown.discard(phone)
+        _report_keys.pop(phone, None)  # new person → new report key (P0-b)
     for k, v in ext.items():
         if k != "report_ready" and v not in (None, ""):
             _collected[phone][k] = v
@@ -399,10 +418,18 @@ async def _search_existing_matches(name: str, kind: str, exclude_id: str | None 
     return results[:40]
 
 
+# Minimum face similarity to DISCLOSE an identity synchronously (P0-c). Matches
+# are still recorded for human review at the lower FACE_MATCH_THRESHOLD (0.50),
+# but the bot only reveals a name/location inline above this stricter bar.
+_FACE_DISCLOSE_THRESHOLD = 0.65
+
+
 async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
-    """Given a face match_id, return details of the OTHER report in the match
-    (the matched person, not the photo sender): name, location, source, url.
-    Returns {} on any failure."""
+    """Details of the OTHER report in a face match, ONLY when safe to disclose
+    synchronously (P0-c): face_score >= threshold AND the matched record is a
+    PUBLIC source (never reveal another family's private WhatsApp report to a
+    stranger). Returns {} when disclosure is not allowed → caller sends a generic
+    'in verification' message instead."""
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
     hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
@@ -411,11 +438,13 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
             mr = await cl.get(
                 f"{sb}/rest/v1/matches",
                 headers=hdr,
-                params={"id": f"eq.{match_id}", "select": "missing_id,found_id"},
+                params={"id": f"eq.{match_id}", "select": "missing_id,found_id,face_score"},
             )
             if mr.status_code != 200 or not mr.json():
                 return {}
             row = mr.json()[0]
+            if float(row.get("face_score") or 0) < _FACE_DISCLOSE_THRESHOLD:
+                return {}  # too weak to disclose inline; leave to human review
             other_id = row["found_id"] if row.get("missing_id") == source_report_id else row["missing_id"]
             if not other_id:
                 return {}
@@ -426,6 +455,9 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
             )
             if rr.status_code == 200 and rr.json():
                 rep = rr.json()[0]
+                # F7 on the FACE path: never reveal a private WhatsApp report.
+                if rep.get("source") == "waha_whatsapp":
+                    return {}
                 return {
                     "name": rep.get("full_name"),
                     "location": rep.get("last_seen_location"),
@@ -566,7 +598,7 @@ async def _handle_message(payload: dict, app: Any) -> None:
         photo_analyzed = False
 
         if media_url:
-            conv_key_photo = hashlib.md5(phone.encode()).hexdigest()[:12]
+            conv_key_photo = _report_key(phone)  # P0-b: the active report's key
             sb = settings.supabase_url.rstrip("/")
             sb_key = settings.supabase_service_role_key
             try:
@@ -592,21 +624,23 @@ async def _handle_message(payload: dict, app: Any) -> None:
                         photo_analyzed = True
                         match_id = await process_photo_for_report(report_id, media_url, app)
                         if match_id:
+                            # P0-c: _lookup_match_details returns {} unless disclosure is
+                            # safe (strong score + PUBLIC source). Otherwise → generic.
                             d = await _lookup_match_details(match_id, report_id)
-                            nm = d.get("name") or "persona registrada"
-                            src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
-                            url_txt = f"\n{d['url']}" if d.get("url") else ""
-                            if d.get("location"):
+                            if d.get("name") or d.get("location"):
+                                nm = d.get("name") or "persona registrada"
+                                src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
+                                url_txt = f"\n{d['url']}" if d.get("url") else ""
+                                locp = f", ubicación: *{d['location']}*" if d.get("location") else ", ubicación por confirmar"
                                 face_reply = (
                                     f"Analicé la foto. Hay una *posible* coincidencia facial: "
-                                    f"*{nm}*, ubicación: *{d['location']}*{src_txt}.{url_txt}\n"
+                                    f"*{nm}*{locp}{src_txt}.{url_txt}\n"
                                     "En verificación — Reúne VE confirmará y te contactará."
                                 )
                             else:
                                 face_reply = (
-                                    f"Analicé la foto. Hay una *posible* coincidencia facial: "
-                                    f"*{nm}*{src_txt}, ubicación por confirmar.{url_txt}\n"
-                                    "En verificación — Reúne VE confirmará y te contactará."
+                                    "Analicé la foto. Hay una posible coincidencia en verificación. "
+                                    "El equipo Reúne VE la revisará y te contactará si se confirma."
                                 )
                             await _waha_send(phone, face_reply)
                             face_match_found = True
@@ -652,29 +686,36 @@ async def _handle_message(payload: dict, app: Any) -> None:
 
     name = (extracted.get("name") or "").strip()
     kind = extracted.get("kind") or "missing"
+    loc = extracted.get("location")
+    desc = extracted.get("description")
 
-    # Register / update the report as soon as we have name + kind. Idempotent
-    # (same conv_key), so refining details across turns updates the same row —
-    # no mid-conversation reset that fragments the flow.
+    # P0-a: a FOUND person may be UNIDENTIFIED (no name) — rescuer/hospital
+    # reporting an unconscious person. Register with a placeholder; matching then
+    # relies on photo + location, not name. This is the highest-value case.
+    found_unident = (extracted.get("kind") == "found") and (not name) and bool(loc or desc)
+    effective_name = name or (_UNIDENTIFIED if found_unident else "")
+
+    # Register / update the report. P0-b: per-report key (unique per person), so a
+    # phone reporting several relatives never overwrites a prior one.
     report_id = None
-    if name and extracted.get("kind"):
-        conv_key = hashlib.md5(phone.encode()).hexdigest()[:12]
-        report_id = await _upsert_report(phone, extracted, conv_key)
+    if extracted.get("kind") and (name or found_unident):
+        conv_key = _report_key(phone)
+        upsert_data = {**extracted, "name": effective_name}
+        report_id = await _upsert_report(phone, upsert_data, conv_key)
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, _hp(phone))
-            await _register_subscriber(report_id, phone, extracted)
+            await _register_subscriber(report_id, phone, upsert_data)
             asyncio.create_task(embed_and_match_report(report_id, {
-                "full_name": name,
+                "full_name": effective_name,
                 "age": extracted.get("age"),
-                "last_seen_location": extracted.get("location"),
-                "distinguishing_marks": extracted.get("description"),
+                "last_seen_location": loc,
+                "distinguishing_marks": desc,
                 "kind": kind,
             }, app))
 
-    # Search + show results ONCE per report, when there's enough to disambiguate
-    # (name + location or age). Avoids the premature "no coincidencias" dump on a
-    # bare name and the every-turn spam.
-    have_enough = bool(name) and bool(extracted.get("location") or extracted.get("age"))
+    # Name search only for REAL names. An unidentified found person can't be
+    # text-searched usefully; it relies on the face + background cross-match.
+    have_enough = bool(name) and bool(loc or extracted.get("age"))
     if have_enough and phone not in _searched_shown:
         _searched_shown.add(phone)
         if reply:
