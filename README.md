@@ -119,7 +119,8 @@ migrations/005_fix_face_rpc.sql      ← RPC match_reports_by_face
 migrations/create_external_leads.sql
 migrations/006_drop_crisis_tables.sql ← elimina tablas del viejo Crisis VE
 migrations/007_optimize_ivfflat.sql
-migrations/008_ivfflat_probes.sql
+migrations/008_ivfflat_probes.sql    ← BUG: SET LOCAL en función STABLE (rompe RPC)
+migrations/009_fix_rpc_volatile.sql  ← FIX: usa cláusula SET ivfflat.probes a nivel función
 ```
 
 ## Notas técnicas
