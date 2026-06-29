@@ -52,6 +52,7 @@ from scrapers.base import age_match_score
 from text_normalize import (
     deaccent as _deaccent_shared,
     location_score,
+    normalize_location,
     phonetic_token,
     phonetic_token_set,
 )
@@ -318,7 +319,7 @@ def _dedup_candidates(rows: list, limit: int = 3) -> list:
     unique: list = []
     for m in rows:
         tokens = (m.get("full_name") or "").lower().split()
-        loc_tok = re.sub(r"\s+", "", (m.get("last_seen_location") or "").lower())[:30]
+        loc_tok = (normalize_location(m.get("last_seen_location")) or "")[:30]
         first_tok = tokens[0] if tokens else ""
         last_tok = tokens[-1] if tokens else ""
         key_first = f"{first_tok}|{loc_tok}"
@@ -346,29 +347,47 @@ except ImportError:  # pragma: no cover
 _NAME_FLOOR = 0.60
 # Max age difference (years) before a candidate is rejected when BOTH ages are known.
 _AGE_GATE = 15
+# A name slightly below the floor is rescued ONLY with strong age+location
+# corroboration (recovers partial hospital records like 'Karina Gonzales, 39').
+_NAME_RESCUE_FLOOR = 0.50
 
 
 def _name_score(query: str, cand: str) -> float:
-    """0..1 name similarity that requires real token overlap, not just one
-    shared given name. Accent-insensitive, with a Spanish-phonetic channel so
-    homophones (José/Hose, González/Gonsales) still match. Blends bidirectional
-    token overlap with token-sort ratio."""
+    """0..1 name similarity requiring real token overlap. Accent-insensitive with a
+    Spanish-phonetic homophone channel. Query tokens are deduped by phonetic form so
+    'Vanesa'+'Vannessa' count as ONE signal, and each candidate token is matched at
+    most once (no double-count against a short candidate)."""
     q = _deaccent_shared(query)
     c = _deaccent_shared(cand)
     qt = [t for t in q.split() if len(t) >= 3]
     ct = [t for t in c.split() if len(t) >= 3]
     if not qt or not ct:
         return 0.0
-    cand_phon = phonetic_token_set(cand)
+    # Collapse query tokens that share a phonetic form (Vanesa==Vannessa=='banesa').
+    seen_ph: set[str] = set()
+    uniq_qt: list[str] = []
+    for t in qt:
+        ph = phonetic_token(t)
+        if ph not in seen_ph:
+            seen_ph.add(ph)
+            uniq_qt.append(t)
+    qt = uniq_qt
+    used: set[int] = set()                      # each candidate token hit at most once
     matched = 0
     for t in qt:
-        fuzzy_hit = _HAS_FUZZ and any(_fuzz.ratio(t, u) >= 85 for u in ct)
-        phon_hit = phonetic_token(t) in cand_phon          # homophone channel
-        if fuzzy_hit or phon_hit or t in ct:
-            matched += 1
-    # Denominator = the LONGER name: a 2-token candidate must still cover most of a
-    # 5-token query. (min() rewarded short partials — 'Vanesa Gonzalez' scored 1.0
-    # against 'Karina Vanesa Vannessa Leon Gonzales', a false hospital match.)
+        for i, u in enumerate(ct):
+            if i in used:
+                continue
+            if t == u or (_HAS_FUZZ and _fuzz.ratio(t, u) >= 85) \
+                    or phonetic_token(t) == phonetic_token(u):
+                used.add(i)
+                matched += 1
+                break
+    # Coverage gate: at least a quarter of distinct query tokens must hit (>=2 of a
+    # 5-token name). Blocks a short candidate that saturates one shared surname while
+    # the distinctive query tokens (Karina, Leon) are absent.
+    if matched / len(qt) < 0.25:
+        return 0.0
     overlap = matched / max(len(qt), len(ct))
     tsr = (_fuzz.token_sort_ratio(q, c) / 100.0) if _HAS_FUZZ else overlap
     return 0.6 * overlap + 0.4 * tsr
@@ -402,23 +421,30 @@ def _rank_candidates(query_name: str, query_age, rows: list, query_location: str
         cand_name = m.get("full_name") or ""
         if not cand_name:
             continue
-        ns = _name_score(query_name, cand_name)
-        if ns < _NAME_FLOOR:
-            continue
-        # Age hard-gate (like a human reviewer): when BOTH ages are known, reject a
-        # clearly different age — a 6-year-old is never a 39-year-old. Records with
-        # unknown age are kept (most hospital rows lack age; rely on name/cédula).
         try:
             c_age = int(str(m.get("age")).strip()) if m.get("age") not in (None, "") else None
         except (ValueError, TypeError):
             c_age = None
+        # Age hard-gate FIRST (independent of name): a 6-year-old is never a 39-year-old.
+        # Unknown age on either side → kept (most hospital rows lack age).
         if q_age is not None and c_age is not None:
             if abs(q_age - c_age) > _AGE_GATE or (min(q_age, c_age) < 13 <= max(q_age, c_age) and abs(q_age - c_age) > 6):
+                continue
+        ns = _name_score(query_name, cand_name)
+        if ns < _NAME_FLOOR:
+            # Rescue: a just-below-floor name surfaces ONLY if age AND location both
+            # strongly corroborate (recovers 'Karina Gonzales, 39'). The 6yo never
+            # reaches here (age gate above).
+            if ns < _NAME_RESCUE_FLOOR:
+                continue
+            age_ok = q_age is not None and c_age is not None and abs(q_age - c_age) <= 5
+            loc_ok = location_score(query_location, m.get("last_seen_location")) >= 0.7
+            if not (age_ok and loc_ok):
                 continue
         ag = age_match_score(q_age, m.get("age"))                       # 0..1, 0.5 if unknown
         loc = location_score(query_location, m.get("last_seen_location"))  # 0..1, 0.5 if unknown
         score = 0.7 * ns + 0.15 * ag + 0.15 * loc
-        scored.append((score, {**m, "_score": round(score, 3)}))
+        scored.append((score, {**m, "_score": round(score, 3), "_ns": round(ns, 3)}))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
 
@@ -991,16 +1017,34 @@ async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_
        2) name match in a hospital/refugio (with age gate + strict name),
        3) other 'se busca' sources (secondary).
     Never invents a match — every line is a real DB candidate."""
-    # LOCALIZED = strong "ya está en un hospital/refugio" evidence. REFERENCE = other
-    # search listings (incl. same-cédula in a 'se busca' source = another searcher).
-    # Deduped by record (source_url) so the same listing never shows twice.
+    # LOCALIZED (strong) = cédula-in-hospital OR a corroborated name match.
+    # WEAK_LOCAL = a hospital name match WITHOUT a second agreeing signal (hedged).
+    # REFERENCE = other 'se busca' listings (incl. same-cédula in a non-hospital
+    # source = another searcher). Deduped by record so nothing shows twice.
     localized: dict[str, str] = {}
+    weak_local: dict[str, str] = {}
     reference: dict[str, str] = {}
     cedula_in_hospital = False
+    try:
+        q_age = int(str(age).strip()) if age not in (None, "") else None
+    except (ValueError, TypeError):
+        q_age = None
 
     def _add(bucket: dict, m: dict, mark: str = "") -> None:
         key = m.get("source_url") or m.get("id") or _format_match_line(m)
         bucket.setdefault(key, mark + _format_match_line(m))
+
+    def _corroborated(m: dict) -> bool:
+        # "Posible coincidencia" needs a strong name AND a second agreeing signal.
+        if m.get("_ns", 0) < 0.75:
+            return False
+        try:
+            c_age = int(str(m.get("age")).strip()) if m.get("age") not in (None, "") else None
+        except (ValueError, TypeError):
+            c_age = None
+        age_ok = q_age is not None and c_age is not None and abs(q_age - c_age) <= 10
+        loc_ok = location_score(loc, m.get("last_seen_location")) >= 0.7
+        return age_ok or loc_ok
 
     if cedula:
         for m in await _search_by_cedula(cedula, exclude_id=report_id):
@@ -1012,17 +1056,21 @@ async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_
     if name:
         hosp_cands = await _search_hospital_matches(name, exclude_id=report_id)
         for m in _dedup_candidates(_rank_candidates(name, age, hosp_cands, loc), limit=3):
-            _add(localized, m)
+            _add(localized if _corroborated(m) else weak_local, m)
         gen = await _search_existing_matches(name, kind, exclude_id=report_id)
         gen = [c for c in gen if c.get("source") not in _HOSP_SOURCES]
         for m in _dedup_candidates(_rank_candidates(name, age, gen, loc), limit=3):
             _add(reference, m)
-    # Don't repeat a record in reference if it's already shown as localized.
-    for k in list(reference):
+    for k in list(weak_local):
         if k in localized:
+            weak_local.pop(k, None)
+    for k in list(reference):
+        if k in localized or k in weak_local:
             reference.pop(k, None)
     localized_lines = list(localized.values())[:4]
+    weak_lines = list(weak_local.values())[:3]
     reference_lines = list(reference.values())[:3]
+
     parts: list[str] = []
     if localized_lines:
         head = ("✅ *Coincidencia por cédula en hospital/refugio* — muy probable que sea la persona:"
@@ -1030,6 +1078,11 @@ async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_
                 else "Posible coincidencia en hospital/refugio (en verificación):")
         parts.append(head + "\n" + "\n".join(localized_lines)
                      + "\nEl equipo Reúne VE lo verifica antes de confirmar.")
+    elif weak_lines:
+        parts.append("Hay registros con un *nombre parecido* en hospitales/refugios, pero sin "
+                     "datos suficientes para confirmar que sea la misma persona:\n"
+                     + "\n".join(weak_lines)
+                     + "\nPuede no ser ella. El equipo Reúne VE lo revisa.")
     else:
         parts.append("Por ahora *no aparece* en hospitales ni refugios de nuestra base.")
     if reference_lines:
