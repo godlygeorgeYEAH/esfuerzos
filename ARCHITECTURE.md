@@ -4,6 +4,10 @@
 **Fecha:** 2026-06-29
 **Estado:** Producción
 
+> **DOC MAESTRO:** la documentación completa y actual (arquitectura, flujos con diagramas, matching,
+> fuentes, dashboard, operaciones) vive en [`README.md`](README.md). Este archivo conserva detalle
+> histórico; ante conflicto, manda el README + `DATA-MODEL.md`.
+>
 > **ACTUALIZACIÓN 2026-06-29 (corrige drift).** El canal primario es **WAHA WhatsApp + Groq**,
 > NO Base44. Base44 fue **removido** del proyecto. El bot WAHA (`waha_intake.py`) SÍ está montado
 > en `main.py` y es el único canal en producción. El contenedor se llama **`reune-ve-api`**.

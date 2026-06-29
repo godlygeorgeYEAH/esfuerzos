@@ -1,131 +1,358 @@
 # Reúne VE
 
-Bot de reunificación familiar post-crisis para Venezuela. Recibe reportes de personas desaparecidas y personas encontradas vía WhatsApp, cruza los datos con fuentes externas (hospitales, redes sociales, organizaciones solidarias) y detecta coincidencias por texto y reconocimiento facial.
+Bot de WhatsApp para **reunificación familiar** tras el terremoto de Venezuela de junio 2026.
+Una familia escribe buscando a una persona; el bot le dice **si ya fue localizada en un hospital
+o refugio**, o registra la búsqueda y avisa apenas aparezca. Cruza cada búsqueda contra ~14
+fuentes (hospitales, refugios, agregadores ciudadanos) por **cédula exacta, nombre y rostro**,
+con **verificación humana obligatoria** antes de confirmarle algo a una familia.
 
-## Arquitectura
+> Documento maestro. Para el esquema de datos exacto ver [`DATA-MODEL.md`](DATA-MODEL.md);
+> para notas de arquitectura históricas ver [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+---
+
+## 1. Qué hace, en simple
+
+- Recibe por WhatsApp el reporte de una persona **buscada** ("busco a…") o **encontrada**
+  ("encontré a…", o una foto de un rescate).
+- Hace un **formulario corto y predecible**: nombre → cédula → edad → ubicación → seña/foto → teléfono.
+- Busca de inmediato y responde **claro**, priorizando si **ya está en un hospital/refugio**:
+  - **Cédula exacta en hospital** → "muy probable que sea la persona".
+  - **Nombre fuerte + edad/ubicación que concuerdan** → "posible coincidencia, en verificación".
+  - **Nombre parecido sin respaldo** → se muestra pero **advertido** ("puede no ser ella").
+  - **Nada** → "no aparece aún; tu reporte queda activo y te aviso".
+- En segundo plano, cada nuevo registro de hospitales/refugios se **cruza continuamente** contra las
+  búsquedas activas. Cuando hay coincidencia, un **humano la aprueba** en un panel y recién ahí el
+  bot **notifica a la familia**.
+
+Nunca le dice a una familia "lo encontramos" ni "falleció" por su cuenta: las afirmaciones de
+identidad/estado pasan siempre por revisión humana, y un guard de salida bloquea cualquier
+afirmación no cubierta.
+
+---
+
+## 2. Arquitectura del sistema
+
+```mermaid
+flowchart TD
+    F["👨‍👩‍👧 Familia (WhatsApp)"] -->|mensaje/foto| WAHA["WAHA (reune_waha)\nWhatsApp HTTP API, NOWEB"]
+    WAHA -->|"POST /webhook/waha\n(HMAC X-Webhook-Hmac sha512)"| API["FastAPI (reune-ve-api, :8080)"]
+
+    subgraph API_BOX["reune-ve-api (un solo proceso Python)"]
+      direction TB
+      INTAKE["waha_intake\nformulario determinístico + búsqueda"]
+      LLM["llm_client.chat_json\nGroq → Cerebras → OpenRouter"]
+      EMB["SentenceTransformer 768d\nInsightFace buffalo_sc 512d"]
+      SCHED["APScheduler\n(scrapers + pipelines)"]
+      ADMIN["/admin/* + /admin/dashboard"]
+      INTAKE --> LLM
+    end
+    API --> INTAKE
+
+    INTAKE -->|upsert reporte + suscriptor| DB[("Supabase\nPostgres + pgvector")]
+    SCHED -->|14 scrapers| SRC["Fuentes: hospitales, refugios,\nagregadores ciudadanos"]
+    SRC --> DB
+    SCHED -->|"embed, cross-match texto/cara/cédula, dedup"| DB
+    SCHED -->|notifier| WAHA
+    REV["🧑‍⚕️ Revisor (SSH tunnel)"] --> ADMIN
+    ADMIN --> DB
 ```
-WhatsApp → WAHA (self-hosted) → POST /webhook/waha
-                                        │
-                               FastAPI (reune-api)
-                               ├── Groq LLaMA 3.3 70B  — extrae nombre/edad/tipo del chat
-                               ├── SentenceTransformer  — embedding de texto (768 dim)
-                               ├── InsightFace buffalo_sc — embedding facial (512 dim)
-                               ├── APScheduler  — scrapers cada 5 min (poll) / 1 h (full)
-                               └── pgvector RPC — match semántico + facial
-                                        │
-                                  Supabase (Postgres + pgvector)
-                                  tablas: reports, photos, matches
+
+- **Un solo contenedor** (`reune-ve-api`): API + modelos ML + scrapers + pipelines, vía FastAPI +
+  asyncio + APScheduler. Sin microservicios.
+- **WAHA** (`reune_waha`) es el transporte de WhatsApp (NOWEB engine, Baileys). Firma cada webhook
+  con HMAC-SHA512 (`X-Webhook-Hmac`).
+- **Supabase** (Postgres + pgvector) es la única capa de persistencia y búsqueda vectorial.
+- Deploy = `git pull` + `docker restart` (código por bind-mount). El firewall cierra `:8080`/`:3000`
+  al exterior; el dashboard se accede por túnel SSH.
+
+---
+
+## 3. Flujo de conversación (formulario determinístico)
+
+El LLM **solo extrae datos**; una máquina de estados fija decide qué preguntar (un dato a la vez, en
+orden, nunca repite) y qué responder. Las coincidencias salen **solo de la búsqueda real**, nunca del
+LLM (esto eliminó el bug de "posible coincidencia" inventada).
+
+```mermaid
+flowchart TD
+    M["Mensaje entrante"] --> G{"¿Saludo / 'nuevo'?\n(hola, buenas, menu...)"}
+    G -->|sí| W["Reset + bienvenida\n+ pide nombre"]
+    G -->|no| EX["LLM extrae campos\n(kind, name, cedula, age, location, desc, contact)"]
+    EX --> RPT["Crea/actualiza reporte\nsource=waha_whatsapp\n+ registra teléfono (bot_subscribers)\n+ embed + cross-match en background"]
+    RPT --> PH{"¿foto?"}
+    PH -->|sí| FACE["Embedding facial + búsqueda visual"]
+    PH -->|no| NF
+    FACE --> NF{"¿Falta algún campo\ndel formulario?"}
+    NF -->|"sí (no repetir; 'no sé' lo salta)"| ASK["Pregunta el siguiente campo"]
+    NF -->|no| SEARCH["Búsqueda + respuesta\n(hospital-primero, ver §4)"]
+    ASK --> M
 ```
 
-**Scrapers activos** (background, automáticos):
-`reconexion`, `sos_venezuela`, `venezreporta` (API REST), `terremotove`, `google_drive_hospital`,
-`red_solidaria_venezuela`, `localizados_venezuela`, `venezuela_te_busca`, `sos_laguaira`,
-`pacientes_terremoto`, `tuayudave`, `hospitales_ve`*, `redayuda_ve`*
+**Orden del formulario:** `name → cedula → age → location → description → contact`.
+- Un campo respondido-pero-vacío (incluido "no sé") se **marca como saltado y nunca se vuelve a
+  preguntar**.
+- "Hola"/"buenas"/"nuevo"/"otra persona" → **reinicia** y da la bienvenida.
+- Entiende lenguaje natural: "busco a mi hijo Pedro de 5 años, cédula 12345678" captura nombre+edad+
+  cédula de un golpe y salta esas preguntas.
+- El estado del formulario se persiste por teléfono en `waha_sessions` (sobrevive reinicios).
 
-\* Solo se activan si la clave externa correspondiente está configurada (ver `.env.example`).
+### Respuesta de búsqueda — orden tipo revisor humano
 
-## Flujo del bot
+```mermaid
+flowchart TD
+    Q["Datos del buscado\n(name, cédula, age, location)"] --> C{"¿Cédula dada?"}
+    C -->|sí| CED["Busca cédula exacta\n(CI: digits en distinguishing_marks)"]
+    CED --> CH{"¿en hospital/refugio?"}
+    CH -->|sí| STRONG["✅ Coincidencia por cédula\nmuy probable"]
+    CH -->|no| REF1["🪪 Referencia\n(otra búsqueda con misma cédula)"]
+    C -->|no| NAME
+    STRONG --> NAME["Búsqueda por nombre en hospitales/refugios"]
+    REF1 --> NAME
+    NAME --> GATE{"Edad concuerda? (gate dura >15)\nNombre cubre la consulta?"}
+    GATE -->|"name≥0.75 + edad/ubic concuerdan"| POS["Posible coincidencia\nen verificación"]
+    GATE -->|"name≥0.60 sin respaldo"| WEAK["Nombre parecido,\nsin datos suficientes (advertido)"]
+    GATE -->|"no pasa"| NONE["No aparece en hospitales/refugios"]
+    POS --> REFN["Otras búsquedas (referencia)"]
+    WEAK --> REFN
+    NONE --> REFN
+```
 
-1. Usuario envía mensaje describiendo a una persona desaparecida o encontrada.
-2. WAHA envía el evento a `POST /webhook/waha`.
-3. Groq extrae: nombre, edad, ubicación, tipo (`missing`/`found`), descripción.
-4. Cuando el reporte está completo, se inserta en `reports` con `source=waha_whatsapp`.
-5. Se corre búsqueda sincrónica por nombre (ILIKE) y se informa candidatos al usuario.
-6. En background: embedding de texto + match vectorial contra toda la tabla vía pgvector.
-7. Si el usuario envía foto: embedding facial + búsqueda visual contra `reports` del tipo opuesto.
+---
 
-## Requisitos
+## 4. Motor de matching
 
-- Docker y Docker Compose
-- Proyecto Supabase con pgvector habilitado y migraciones aplicadas (`migrations/`)
-- Instancia WAHA corriendo con número de WhatsApp conectado y webhook apuntando a este servicio
-- API key de Groq (modelo: `llama-3.3-70b-versatile`)
+Todo aterriza en la tabla **`reports`** (fuente única). El cruce produce pares en **`matches`**
+(`status=pending`) que un humano aprueba. Señales, de más fuerte a más débil:
 
-## Correr localmente
+| Señal | Cómo | Umbral / regla |
+|---|---|---|
+| **Cédula exacta** | `run_cedula_exact_match` extrae `CI: <dígitos>` de `distinguishing_marks` y cruza por ID idéntico | match exacto (combined=1.0). La señal más fuerte. |
+| **Cara** | InsightFace 512d, pgvector cosine (`match_reports_by_face`) | `face_score ≥ 0.50`; gate de exposición síncrona `≥ 0.65` |
+| **Texto** | SentenceTransformer 768d, pgvector cosine (`match_reports_by_text`) | `text ≥ 0.75`; solo-texto `≥ 0.82` |
+| **Nombre (búsqueda síncrona)** | token overlap + fuzzy + fonético español; dedup de tokens homófonos | `_NAME_FLOOR 0.60`; rescate 0.50 solo con edad+ubicación |
 
+**Precisión tipo revisor humano** (revisado por swarm adversarial):
+- **Gate de edad duro**: con ambas edades conocidas, rechaza `|Δ|>15` o niño-vs-adulto, *independiente
+  del nombre* (un 6 nunca es un 39).
+- **Nombre estricto**: tokens homófonos del query se cuentan como **una** señal (Vanesa==Vannessa);
+  cada token del candidato se usa una sola vez; gate de cobertura (≥25% de tokens distintos).
+- **Corroboración**: "posible coincidencia" solo si nombre≥0.75 **y** edad/ubicación concuerdan; si no,
+  se muestra **advertido** ("puede no ser ella").
+- **Hospital primero**: la respuesta prioriza fuentes de hospital/refugio (`_HOSPITAL_SOURCES`); las
+  fuentes "se busca" son referencia secundaria. Nunca compara una fuente consigo misma.
+
+```mermaid
+flowchart LR
+    R[("reports\n(todas las fuentes)")] --> E["compute_text_embeddings\n(30 min)"]
+    E --> TX["run_text_cross_match\n(60 min)"]
+    R --> CE["run_cedula_exact_match\n(30 min)"]
+    R --> FB["face_backfill (10 min)\nembebe foto + cruza"]
+    R --> DD["run_dedup_pipeline (4h)\nmarca duplicados"]
+    TX --> MT[("matches\nstatus=pending")]
+    CE --> MT
+    FB --> MT
+    MT --> DASH["/admin/dashboard\n🧑‍⚕️ aprobar / rechazar"]
+    DASH -->|confirmed| NOT["run_match_notifier (10 min)\ngate status=confirmed"]
+    NOT -->|WhatsApp| FAM["👨‍👩‍👧 Familia (suscrita)"]
+```
+
+---
+
+## 5. Fuentes de datos (14 scrapers)
+
+Todos convergen en `reports` con `source` marcando el origen; único por `(source, source_url)`
+(upsert idempotente). Poll cada 5 min, full sweep cada hora.
+
+**Hospitales / refugios** (un match acá = "ya localizado", `_HOSPITAL_SOURCES`):
+| Scraper | Fuente | Cédula |
+|---|---|---|
+| `hospital_consolidado` | xlsx maestro "Registro de Pacientes SISMO 2026" (Dropbox, 19 tabs) | **sí** |
+| `localizave` | localizave.com `/api/pacientes` (hospitales) | **sí** |
+| `hospitales_26jun` | lista consolidada 26-jun | a veces |
+| `pacientes_terremoto` | pacientesterremotovzla.lovable.app (Supabase REST) | no |
+| `google_drive_hospital` | registro hospitalario en Google Docs | no |
+| `hospitales_ve` | otra Supabase de hospitales (requiere key) | no |
+
+**Agregadores ciudadanos / "se busca"** (referencia secundaria):
+`venezuela_te_busca`, `venezreporta`, `terremotove`, `tuayudave`, `localizados_venezuela`,
+`sos_venezuela`, `sos_laguaira`, `red_solidaria_venezuela`, `reconexion`, `desaparecidos_venezuela`.
+
+Cédula → se escribe `CI: <dígitos>` en `distinguishing_marks` para alimentar el match exacto.
+`person_state` (enum vivo: `unknown|alive|injured|deceased`) marca fallecidos con cuidado.
+
+**Pendiente / descartado:** `desaparecidosterremotovenezuela.com` (theempire, ~56-67k registros, el más
+grande) está **bloqueado por CloudFront/WAF**; requiere registro de Integrator + JWT
+(developer@theempire.tech) — mismo backend que `reconexion`. `ayudavenezuela.app` diferido (URL de API
+oculta en el bundle JS). `refugiosvenezuela.com` descartado (solo edificios, sin personas).
+
+---
+
+## 6. Procesos continuos (APScheduler)
+
+| Job | Frecuencia | Función |
+|---|---|---|
+| scrapers `poll` / `full` | 5 min / 60 min | ingieren todas las fuentes → `reports` |
+| `compute_text_embeddings` | 30 min | embeddings de texto de registros nuevos |
+| `run_text_cross_match` | 60 min | cruza buscado↔encontrado por texto |
+| `run_cedula_exact_match` | 30 min | cruza por cédula exacta (la señal más fuerte) |
+| `face_backfill` | 10 min | embebe fotos nuevas + cruza por cara |
+| `run_dedup_pipeline` | 4 h | marca duplicados entre fuentes (`raw_data.possible_duplicate_of`) |
+| `run_match_notifier` | 10 min | avisa a la familia cuando un match está `confirmed` |
+
+---
+
+## 7. Panel de aprobación humana
+
+`GET /admin/dashboard` (HTML+JS, detrás de `ADMIN_KEY`, acceso por túnel SSH). Lista los `matches`
+pendientes lado a lado (buscado vs encontrado) con foto, datos, scores y badges (🏥 hospital/refugio,
+✝ fallecido). **Aprobar** marca `status=confirmed` (+ `reviewer`, `reviewed_at`) → el notifier avisa a
+la familia. **Rechazar** lo descarta.
+
+Modos (botón "Modo"): `high` (default — solo hospital/refugio cross-source, cédula/cara), `hospital`
+(incluye nombre), `all` (todo, incl. ruido de texto). Esto bajó la cola de ~13.6k pendientes a ~900
+accionables.
+
+Acceso:
 ```bash
-git clone https://github.com/godlygeorgeYEAH/esfuerzos.git
-cd esfuerzos
-
-cp .env.example .env
-# Edita .env con tus valores reales
-
-# Red compartida entre reune-api y waha (solo la primera vez)
-docker network create reune_default
-
-# Levanta los servicios
-docker-compose up -d
-
-# Logs en tiempo real
-docker-compose logs -f reune-api
-
-# Health check
-curl http://localhost:8080/health
+ssh -L 8080:localhost:8080 root@13.140.166.72
+# luego abrir http://localhost:8080/admin/dashboard, pegar ADMIN_KEY
 ```
 
-Primer arranque: SentenceTransformer e InsightFace se descargan automáticamente (~1.5 GB).
-La API tarda ~60 segundos en estar lista.
+---
 
-## Endpoints
+## 8. Cadena de fallback LLM
+
+`llm_client.chat_json` intenta proveedores en orden; reintenta 429 por proveedor (cap 4s) y pasa al
+siguiente ante fallo. Solo si TODOS fallan devuelve `LLMUnavailable` → mensaje "alta demanda, reenvía".
+
+1. **Groq** `llama-3.3-70b-versatile` (primario, rápido).
+2. **Cerebras** `gpt-oss-120b` (`reasoning_effort=low`) — el fallback gratis confiable.
+3. **OpenRouter** modelos free (último recurso; suelen estar saturados).
+
+Configurado vía env `LLM_FALLBACKS` (JSON). Las keys viven **solo** en el `.env` del VPS.
+
+---
+
+## 9. Modelo de datos
+
+Esquema vivo completo en [`DATA-MODEL.md`](DATA-MODEL.md) (DER Mermaid) y
+[`migrations/000_current_schema_reference.sql`](migrations/000_current_schema_reference.sql).
+Tablas principales:
+
+- **`reports`** — registro único de personas (todas las fuentes). `kind` (missing/found), `full_name`,
+  `age`, `last_seen_location`, `distinguishing_marks` (lleva `CI: <cédula>`), `person_state`, `source`,
+  `source_url` (único con `source`), `text_embedding` vector(768), `raw_data`.
+- **`photos`** — fotos + `face_embedding` vector(512).
+- **`matches`** — pares `missing_id`/`found_id` + `text_score`/`face_score`/`combined_score`,
+  `status` (pending/confirmed/rejected), `reviewer`, `notify_sent`.
+- **`bot_subscribers`** — `report_id` → teléfono del familiar (para notificar).
+- **`waha_sessions`** — estado del formulario por teléfono.
+- **`llm_leads`** — cola de revisión del panel LLM.
+- **`canonical_reports`** (vista) — `reports` sin duplicados (migración 014, pendiente de aplicar).
+
+> ⚠ **Drift:** las migraciones numeradas están desfasadas vs la DB viva. **La DB viva manda.** Fuente de
+> verdad: `migrations/000_current_schema_reference.sql` + `DATA-MODEL.md`.
+
+---
+
+## 10. Endpoints
 
 | Endpoint | Método | Auth | Descripción |
 |---|---|---|---|
-| `GET /health` | GET | — | Estado de WAHA, Supabase, modelos y scrapers |
-| `POST /webhook/waha` | POST | HMAC opcional | Webhook entrante de WAHA |
+| `GET /health` | GET | — | Estado de WAHA, Supabase, modelos, scrapers |
+| `POST /webhook/waha` | POST | HMAC sha512 | Webhook entrante de WhatsApp |
+| `GET /admin/dashboard` | GET | (shell público, datos por clave) | Panel de aprobación humana |
+| `GET /admin/matches` | GET | X-Admin-Key | Cola de coincidencias (modos high/hospital/all) |
+| `POST /admin/match-review` | POST | X-Admin-Key | Aprobar/rechazar un match |
+| `GET /admin/photo/{report_id}` | GET | X-Admin-Key o `?k=` | Proxy de foto (gated) |
+| `POST /admin/consolidate` | POST | X-Admin-Key | Corre fases de embedding/match |
+| `POST /admin/llm-scrape` / `llm-approve` | POST | X-Admin-Key | Panel LLM: extrae a `llm_leads` / aprueba |
 | `POST /admin/bulk_import` | POST | X-Admin-Key | Importa datos históricos en batch |
-| `POST /admin/consolidate` | POST | X-Admin-Key | Corre embedding + match vectorial/facial |
 
-## Variables de entorno
+`_check_admin` es **fail-closed**: sin `ADMIN_KEY` configurada, todo `/admin/*` devuelve 503.
+
+---
+
+## 11. Variables de entorno
 
 | Variable | Requerida | Descripción |
 |---|---|---|
-| `SUPABASE_URL` | Sí | URL del proyecto Supabase |
-| `SUPABASE_SERVICE_ROLE_KEY` | Sí | Service role key (bypasa RLS) |
-| `LLM_API_KEY` | Sí | Groq API key para el bot de WhatsApp |
-| `WAHA_URL` | No | URL interna de WAHA (default: `http://waha:3000`) |
-| `WAHA_WEBHOOK_SECRET` | No | Secreto HMAC para validar webhooks de WAHA |
-| `ADMIN_KEY` | No | Protege `/admin/*`. Sin valor: endpoints abiertos |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Sí | Proyecto Supabase (service role bypasa RLS) |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Sí | Groq (primario) |
+| `LLM_FALLBACKS` | No | JSON de proveedores fallback (Cerebras, OpenRouter) |
+| `WAHA_URL` | No | URL interna de WAHA (`http://reune_waha:3000`) |
+| `WAHA_API_KEY` | No | Key de la API de WAHA |
+| `WAHA_WEBHOOK_SECRET` | Sí (prod) | Secreto HMAC para validar webhooks |
+| `ADMIN_KEY` | Sí (prod) | Protege `/admin/*` (fail-closed) |
+| `ALLOWED_ORIGINS` | No | CORS (default `*`) |
 
-Ver `.env.example` para la lista completa incluyendo thresholds de matching y scrapers opcionales.
+Ver [`.env.example`](.env.example) para la lista completa (thresholds, keys de scrapers).
 
-## Deploy en VPS
+---
 
-El código está montado por bind-mount (`.:/app` en docker-compose), así que un
-`git pull` actualiza el código en vivo. Solo hace falta reiniciar para recargar
-los módulos de Python (no hace falta `build` salvo que cambien dependencias).
+## 12. Deploy y operaciones
 
+**Deploy normal** (código por bind-mount):
 ```bash
 ssh root@13.140.166.72
-cd /root/esfuerzos
-git pull origin main
-docker restart reune-ve-api
-docker logs -f reune-ve-api --tail 50
-curl http://localhost:8080/health
+cd /root/esfuerzos && git pull origin main && docker restart reune-ve-api
+docker logs -f reune-ve-api --tail 50 ; curl http://localhost:8080/health
 ```
+Cambios de dependencias (ej. `openpyxl`): `docker compose up --build -d`.
 
-## Migraciones de base de datos
+**Recuperar la sesión de WhatsApp (WAHA NOWEB se desempareja cada cierto tiempo):**
+Síntoma: el bot no responde; `GET /api/sessions/default` → `FAILED` con
+`Connection Failure ... do not reconnect` (WhatsApp desvinculó el dispositivo).
+```bash
+docker restart reune_waha            # abre una ventana SCAN_QR justo después
+# obtener el QR (con X-Api-Key) o entrar al dashboard de WAHA por túnel:
+ssh -L 3000:localhost:3000 root@13.140.166.72   # http://localhost:3000/dashboard
+# escanear con el teléfono del bot (+57 315 7915931): WhatsApp → Dispositivos vinculados
+```
+La sesión pasa a `WORKING`. (Para estabilidad de largo plazo conviene la WhatsApp Business API oficial.)
 
-Aplica en orden numérico desde el Supabase SQL Editor. La base en producción ya
-las tiene aplicadas; esta lista es para reconstruir el esquema desde cero:
+El bot habla con `reune_waha` (NO el contenedor `waha`, que está huérfano sin red).
+
+---
+
+## 13. Seguridad
+
+- **RLS**: `reports`/`photos` con RLS habilitado y **sin política anon** (anon denegado); el bot usa
+  `service_role` que bypasa RLS. (migración 012 cerró un leak de enumeración masiva).
+- **Firewall**: DOCKER-USER dropea `:8080`/`:3000` externos (systemd `reune-firewall.service`). El
+  dashboard y WAHA solo por túnel SSH.
+- **Webhook HMAC** sha512 fail-closed con `WAHA_WEBHOOK_SECRET`.
+- **Guard de salida** (`_sanitize_reply`): reemplaza por un hedge seguro cualquier afirmación de muerte
+  (incl. eufemismos) o de coincidencia confirmada (incl. voz pasiva) — nunca falsa esperanza/duelo.
+- **Verificación humana obligatoria**: ninguna familia recibe "encontrado/confirmado" sin que un humano
+  apruebe el match en el dashboard.
+- PII (teléfonos) hasheada en logs; `reporter_contact_enc` cifrado.
+
+---
+
+## 14. Notas técnicas / gotchas
+
+- **DB viva manda** sobre las migraciones (drift conocido): `matches` usa `missing_id`/`found_id` +
+  `reviewer` + `notify_sent`; `person_state` enum = `unknown|alive|injured|deceased`.
+- **PostgREST** `in.(...)` con ~2000 UUIDs revienta la URL (414) → enriquecer en lotes de ~100.
+- **Fotos**: las originales de muchas fuentes están en un S3 privado (403); los thumbnails del dashboard
+  son best-effort, el link a la fuente es el camino confiable. Futuro: guardar recortes en bucket propio.
+- **Sandbox local** sin red de salida (HTTP 000) — descargar/probar fuentes desde el VPS.
+- `terremotove` inserta `EVENTO:` (daños, no personas); el pipeline los omite.
+
+---
+
+## Migraciones
+
+Aplicar en orden numérico desde el SQL Editor de Supabase. La prod ya las tiene; esta lista es para
+reconstruir. La autoritativa del esquema vivo es `migrations/000_current_schema_reference.sql` (referencia).
 
 ```
-migrations/001_initial.sql
-migrations/002_match_functions.sql   ← tablas reports/photos/matches + RPC pgvector
-migrations/002_unique_constraint.sql ← UNIQUE(source, source_url) para upsert
-migrations/003_face_rpc.sql
-migrations/004_conversation_ids.sql
-migrations/005_fix_face_rpc.sql      ← RPC match_reports_by_face
-migrations/create_external_leads.sql
-migrations/006_drop_crisis_tables.sql ← elimina tablas del viejo Crisis VE
-migrations/007_optimize_ivfflat.sql
-migrations/008_ivfflat_probes.sql    ← BUG: SET LOCAL en función STABLE (rompe RPC)
-migrations/009_fix_rpc_volatile.sql  ← FIX: usa cláusula SET ivfflat.probes a nivel función
+000_current_schema_reference.sql  ← snapshot del esquema VIVO (referencia, no correr)
+002_match_functions.sql           ← tablas reports/photos/matches + RPC pgvector
+002_unique_constraint.sql         ← UNIQUE(source, source_url)
+009_fix_rpc_volatile.sql          ← FIX RPC pgvector (SET ivfflat.probes a nivel función)
+010_bot_subscribers.sql · 011_grants_and_llm_leads.sql · 012_drop_anon_read.sql · 013_waha_sessions.sql
+014_canonical_view.sql            ← vista canonical_reports (PENDIENTE de aplicar)
 ```
-
-## Notas técnicas
-
-- `terremotove` inserta filas con prefijo `EVENTO:` (localizaciones de daños, no personas). El pipeline de consolidación las omite.
-- Estado de conversación en memoria (`_conv_state`). Un reinicio del contenedor borra las sesiones activas en curso (el reporte ya persistido en `reports` no se pierde).
-- `dedup_pipeline.py` corre cada 4h: agrupa reportes casi-duplicados entre scrapers (mismo nombre/ubicación con variaciones) y marca los no-canónicos en `raw_data.possible_duplicate_of`. Nunca borra filas.
-- Las fotos de WhatsApp llegan vía WAHA por HTTP interno (`http://waha:3000`); el pipeline facial confía explícitamente en ese host y descarga con `X-Api-Key`.
