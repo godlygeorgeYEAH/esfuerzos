@@ -177,15 +177,22 @@ Todos convergen en `reports` con `source` marcando el origen; único por `(sourc
 
 **Agregadores ciudadanos / "se busca"** (referencia secundaria):
 `venezuela_te_busca`, `venezreporta`, `terremotove`, `tuayudave`, `localizados_venezuela`,
-`sos_venezuela`, `sos_laguaira`, `red_solidaria_venezuela`, `reconexion`, `desaparecidos_venezuela`.
+`sos_venezuela`, `sos_laguaira`, `red_solidaria_venezuela`, `desaparecidos_venezuela`.
+
+**Reconexión (theempire) — API de integradores** (`reconexion`, `reconexion_listas`): el backend más
+grande (`desaparecidos-terremoto-api.theempire.tech/api/v1`), antes bloqueado por CloudFront/WAF, ahora
+integrado vía **API de solo lectura con `X-Api-Key`**. CloudFront fingerprinta el TLS (JA3) y bloquea
+httpx/aiohttp → el cliente (`reconexion_client.py`) usa **`curl_cffi`** (impersonate Chrome). Ingiere
+`/personas` (sin-contacto→missing, localizado→found, con cédula+foto), `/listas` (nombres en centros =
+`reconexion_listas`, fuente hospital/refugio) y usa **`/identificar`** (reconocimiento facial) como
+segundo motor (real-time en el intake de fotos + backfill periódico). Gobernanza de menores: si el
+endpoint devuelve `needsReview` no expone candidatos (revisión humana). Activar con `RECONEXION_API_KEY`.
 
 Cédula → se escribe `CI: <dígitos>` en `distinguishing_marks` para alimentar el match exacto.
 `person_state` (enum vivo: `unknown|alive|injured|deceased`) marca fallecidos con cuidado.
 
-**Pendiente / descartado:** `desaparecidosterremotovenezuela.com` (theempire, ~56-67k registros, el más
-grande) está **bloqueado por CloudFront/WAF**; requiere registro de Integrator + JWT
-(developer@theempire.tech) — mismo backend que `reconexion`. `ayudavenezuela.app` diferido (URL de API
-oculta en el bundle JS). `refugiosvenezuela.com` descartado (solo edificios, sin personas).
+**Descartado:** `ayudavenezuela.app` diferido (URL de API oculta en el bundle JS).
+`refugiosvenezuela.com` descartado (solo edificios, sin personas).
 
 ---
 
@@ -198,6 +205,7 @@ oculta en el bundle JS). `refugiosvenezuela.com` descartado (solo edificios, sin
 | `run_text_cross_match` | 60 min | cruza buscado↔encontrado por texto |
 | `run_cedula_exact_match` | 30 min | cruza por cédula exacta (la señal más fuerte) |
 | `face_backfill` | 10 min | embebe fotos nuevas + cruza por cara |
+| `reconexion_face_backfill` | 15 min | cruza buscados-con-foto vs el registro reconexión (`/identificar`); solo si `RECONEXION_API_KEY` |
 | `run_dedup_pipeline` | 4 h | marca duplicados entre fuentes (`raw_data.possible_duplicate_of`) |
 | `run_match_notifier` | 10 min | avisa a la familia cuando un match está `confirmed` |
 
@@ -287,6 +295,8 @@ Tablas principales:
 | `WAHA_API_KEY` | No | Key de la API de WAHA |
 | `WAHA_WEBHOOK_SECRET` | Sí (prod) | Secreto HMAC para validar webhooks |
 | `ADMIN_KEY` | Sí (prod) | Protege `/admin/*` (fail-closed) |
+| `RECONEXION_API_KEY` | No | API de integradores theempire (activa el scraper `reconexion` + `/identificar`). Solo en `.env` del VPS |
+| `HOSPITALES_ANON_KEY`, `REDAYUDA_ANON_KEY` | No | Activan scrapers opcionales |
 | `ALLOWED_ORIGINS` | No | CORS (default `*`) |
 
 Ver [`.env.example`](.env.example) para la lista completa (thresholds, keys de scrapers).

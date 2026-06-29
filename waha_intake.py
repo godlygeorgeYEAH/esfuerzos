@@ -99,7 +99,8 @@ _SKIP_WORDS = {"no", "no se", "no lo se", "nose", "ninguno", "ninguna", "no teng
 # Hospital/shelter sources: a candidate from one of these means "ya localizado" —
 # shown FIRST. Keep in sync with main._HOSPITAL_SOURCES.
 _HOSP_SOURCES = {"hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
-                 "google_drive_hospital", "hospitales_ve", "localizave"}
+                 "google_drive_hospital", "hospitales_ve", "localizave",
+                 "reconexion_listas"}
 
 # Greeting / restart: a returning user must start a CLEAN form, not resume a stale
 # one. A bare greeting or a "nuevo" intent resets the form and welcomes.
@@ -241,6 +242,8 @@ SOURCE_LABELS: dict[str, str] = {
     "localizave": "LocalizaVE (hospitales)",
     "desaparecidos_venezuela": "Desaparecidos Venezuela",
     "hospitales_26jun": "Hospitales (26-jun)",
+    "reconexion": "Reconexión",
+    "reconexion_listas": "Reconexión (centros/hospitales)",
     "waha_whatsapp": "Reúne VE (WhatsApp)",
 }
 
@@ -287,6 +290,10 @@ def resolve_source_url(source: str, source_url: str | None) -> str | None:
         return "https://soslaguaira.lat"
     if source == "pacientes_terremoto":
         return "https://pacientesterremotovzla.lovable.app"
+    # reconexion: source_url is "reconexion:<id>" (no public per-person page known);
+    # point to the public site root.
+    if source in ("reconexion", "reconexion_listas"):
+        return "https://desaparecidosterremotovenezuela.com"
     return None
 
 
@@ -909,6 +916,14 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
                 )
         if rid:
             match_id = await process_photo_for_report(rid, media_url, app)
+            # Second face engine: reconexión's curated registry (/identificar). Creates
+            # pending matches for human review; minor governance handled inside.
+            rec_n = 0
+            try:
+                import reconexion_face
+                rec_n = await reconexion_face.identify_and_store(rid, media_url, app)
+            except Exception as exc:  # noqa: BLE001 - never break intake on this
+                logger.warning("reconexion identify (real-time) failed: %s", exc)
             if match_id:
                 d = await _lookup_match_details(match_id, rid)
                 if d.get("name") or d.get("location"):
@@ -925,6 +940,11 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
                         phone,
                         "Analicé la foto. Hay una posible coincidencia en verificación. "
                         "El equipo Reúne VE la revisará y te contactará si se confirma.")
+            elif rec_n:
+                await _waha_send(
+                    phone,
+                    "Analicé la foto. Hay una posible coincidencia en verificación. "
+                    "El equipo Reúne VE la revisará y te contactará si se confirma.")
             else:
                 await _waha_send(
                     phone,

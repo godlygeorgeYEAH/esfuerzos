@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # External scraper keys (leave blank to disable)
     hospitales_anon_key: str = ""
     redayuda_anon_key: str = ""
+    # Reconexión / theempire integrator API (read-only). Leave blank to disable.
+    # CloudFront fingerprints TLS, so the client uses curl_cffi (Chrome impersonation).
+    reconexion_api_key: str = ""
+    reconexion_base_url: str = "https://desaparecidos-terremoto-api.theempire.tech/api/v1"
     # C1: Admin endpoint protection
     admin_key: str = ""
     # C3: CORS origins (comma-separated, or * for open)

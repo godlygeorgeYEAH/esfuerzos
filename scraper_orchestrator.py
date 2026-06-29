@@ -11,7 +11,6 @@ import asyncio
 import logging
 
 from config import get_settings
-from scrapers.reconexion import ReconexionScraper
 from scrapers.sos_venezuela import SosVenezuelaScraper
 from scrapers.venezreporta import VenezReportaScraper
 from scrapers.terremotove import TerremotoVEScraper as TerremotoveScraper
@@ -37,7 +36,6 @@ def _make_scrapers() -> dict:
     # BaseScraper subclasses take (supabase_url, supabase_key) in constructor.
     # BaseVEScraper subclasses read SUPABASE_URL/KEY from env.
     scrapers = {
-        "reconexion": ReconexionScraper(sb_url, sb_key),
         "sos_venezuela": SosVenezuelaScraper(sb_url, sb_key),
         "venezreporta": VenezReportaScraper(sb_url, sb_key),
         "terremotove": TerremotoveScraper(),
@@ -52,6 +50,12 @@ def _make_scrapers() -> dict:
         "desaparecidos_venezuela": DesaparecidosVenezuelaScraper(),
         "localizave": LocalizaveScraper(),
     }
+
+    # Reconexión integrator API (replaces the old 403'd reconexion scraper). Uses
+    # curl_cffi to pass CloudFront's TLS fingerprinting. Enabled only with a key.
+    if settings.reconexion_api_key:
+        from scrapers.reconexion_api import ReconexionAPIScraper
+        scrapers["reconexion"] = ReconexionAPIScraper()
 
     # Optional scrapers (require API keys)
     if settings.hospitales_anon_key:

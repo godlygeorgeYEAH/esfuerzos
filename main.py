@@ -126,6 +126,15 @@ async def lifespan(app: FastAPI):
         args=[app], id="face_backfill", max_instances=1,
     )
 
+    # Reconexión face cross-match: our missing-with-photo reports vs the reconexión
+    # registry via /identificar (second engine). Only when the integrator key is set.
+    if settings.reconexion_api_key:
+        from reconexion_face import run_reconexion_face_backfill
+        scheduler.add_job(
+            run_reconexion_face_backfill, IntervalTrigger(seconds=900, jitter=120),
+            args=[app], id="reconexion_face_backfill", max_instances=1,
+        )
+
     asyncio.create_task(_startup_sweep(scrapers))
     logger.info("Startup complete: %d scraper jobs, WAHA transport active", len(scheduler.get_jobs()))
 
@@ -281,6 +290,7 @@ async def admin_llm_approve(lead_id: str, x_admin_key: str = Header(default=""))
 _HOSPITAL_SOURCES = {
     "hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
     "google_drive_hospital", "hospitales_ve", "localizave",
+    "reconexion_listas",
 }
 
 
