@@ -37,6 +37,10 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # El .env ahora también lleva vars del bot prox (DATABASE_URL, POSTGRES_*)
+        # y del servicio db. Este Settings solo declara las del ecosistema raíz;
+        # ignorar las demás evita ValidationError por "extra_forbidden".
+        extra = "ignore"
 
 
 @lru_cache
