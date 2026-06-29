@@ -7,14 +7,16 @@ Uso — nombre único:
 
 Uso — lista desde archivo (un nombre por línea):
     python buscar_nombre.py --archivo input.txt
-    python buscar_nombre.py --archivo input.txt --limite 20 --ubicacion "La Guaira"
+    python buscar_nombre.py --archivo input.txt --ubicacion "La Guaira"
 
+Salida: output.csv con los top-2 matches por nombre.
 Requiere SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en el entorno o en .env
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import os
 import sys
 
@@ -58,6 +60,19 @@ except ImportError:
     _HAS_FUZZ = False
 
 _NAME_FLOOR = 0.60
+_RECALL_LIMIT = 2
+_CSV_COLUMNS = [
+    "nombre_input",
+    "nombre_match",
+    "score",
+    "name_s",
+    "age_s",
+    "loc_s",
+    "tipo",
+    "edad",
+    "ubicacion",
+    "fuente",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +117,10 @@ def _rank_candidates(query_name: str, query_age, rows: list, query_location: str
         score = 0.7 * ns + 0.15 * ag + 0.15 * loc
         scored.append((score, {
             **m,
-            "_score":    round(score, 3),
-            "_name_s":   round(ns, 3),
-            "_age_s":    round(ag, 3),
-            "_loc_s":    round(loc, 3),
+            "_score":  round(score, 3),
+            "_name_s": round(ns, 3),
+            "_age_s":  round(ag, 3),
+            "_loc_s":  round(loc, 3),
         }))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
@@ -115,7 +130,7 @@ def _rank_candidates(query_name: str, query_age, rows: list, query_location: str
 # Recall: ILIKE por token contra Supabase
 # ---------------------------------------------------------------------------
 
-async def _recall(name: str, limite: int) -> list:
+async def _recall(name: str) -> list:
     sb_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     sb_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
@@ -146,12 +161,12 @@ async def _recall(name: str, limite: int) -> list:
                 params={
                     "select": "id,full_name,age,last_seen_location,source,kind",
                     "full_name": f"ilike.*{token}*",
-                    "limit": str(limite),
+                    "limit": str(_RECALL_LIMIT),
                     "order": "created_at.desc",
                 },
             )
             if r.status_code != 200:
-                print(f"[WARN] Supabase respondió {r.status_code} para token '{token}'", file=sys.stderr)
+                print(f"  [WARN] Supabase {r.status_code} para token '{token}'", file=sys.stderr)
                 continue
             for row in r.json():
                 if row["id"] not in seen_ids:
@@ -162,95 +177,79 @@ async def _recall(name: str, limite: int) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Output
+# Procesar un nombre → lista de filas CSV
 # ---------------------------------------------------------------------------
 
-def _print_results(results: list, query_name: str, query_age, query_location) -> None:
-    if not results:
-        print(f"\nSin resultados para '{query_name}' (piso name_score >= {_NAME_FLOOR})\n")
-        return
+async def _run_one(query_name: str, query_age, query_location: str | None) -> list[dict]:
+    print(f"  → Recall...", end=" ", flush=True)
+    candidates = await _recall(query_name)
+    print(f"{len(candidates)} candidatos  |  Scoring...", end=" ", flush=True)
 
-    col_name  = max(len(r.get("full_name") or "") for r in results)
-    col_name  = max(col_name, 20)
-    col_src   = max(len(r.get("source") or "") for r in results)
-    col_src   = max(col_src, 10)
-    col_loc   = max(len(r.get("last_seen_location") or "") for r in results)
-    col_loc   = max(col_loc, 12)
+    ranked = _rank_candidates(query_name, query_age, candidates, query_location)
+    top = ranked[:_RECALL_LIMIT]
+    print(f"{len(ranked)} matches  |  top {len(top)} al CSV")
 
-    header = (
-        f"{'#':<3} "
-        f"{'SCORE':<7} "
-        f"{'NAME_S':<7} "
-        f"{'AGE_S':<6} "
-        f"{'LOC_S':<6} "
-        f"{'TIPO':<8} "
-        f"{'NOMBRE':<{col_name}} "
-        f"{'EDAD':<5} "
-        f"{'UBICACION':<{col_loc}} "
-        f"{'FUENTE':<{col_src}}"
-    )
+    if not top:
+        return [{"nombre_input": query_name, "nombre_match": "", "score": "",
+                 "name_s": "", "age_s": "", "loc_s": "", "tipo": "",
+                 "edad": "", "ubicacion": "", "fuente": ""}]
 
-    print(f"\nQuery: '{query_name}'"
-          + (f"  edad={query_age}" if query_age else "")
-          + (f"  ubicacion='{query_location}'" if query_location else ""))
-    print(f"Resultados: {len(results)}\n")
-    print(header)
-    print("─" * len(header))
-
-    for i, r in enumerate(results, 1):
-        print(
-            f"{i:<3} "
-            f"{r['_score']:<7} "
-            f"{r['_name_s']:<7} "
-            f"{r['_age_s']:<6} "
-            f"{r['_loc_s']:<6} "
-            f"{(r.get('kind') or ''):<8} "
-            f"{(r.get('full_name') or ''):<{col_name}} "
-            f"{str(r.get('age') or ''):<5} "
-            f"{(r.get('last_seen_location') or ''):<{col_loc}} "
-            f"{(r.get('source') or ''):<{col_src}}"
-        )
-    print()
+    rows = []
+    for r in top:
+        rows.append({
+            "nombre_input": query_name,
+            "nombre_match": r.get("full_name") or "",
+            "score":        r["_score"],
+            "name_s":       r["_name_s"],
+            "age_s":        r["_age_s"],
+            "loc_s":        r["_loc_s"],
+            "tipo":         r.get("kind") or "",
+            "edad":         r.get("age") or "",
+            "ubicacion":    r.get("last_seen_location") or "",
+            "fuente":       r.get("source") or "",
+        })
+    return rows
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-async def _run_one(query_name: str, query_age, query_location: str | None, limite: int) -> None:
-    print(f"[1/2] Recall ILIKE → Supabase...", end=" ", flush=True)
-    candidates = await _recall(query_name, limite)
-    print(f"{len(candidates)} candidatos")
-
-    print(f"[2/2] Scoring + ranking...", end=" ", flush=True)
-    ranked = _rank_candidates(query_name, query_age, candidates, query_location)
-    print(f"{len(ranked)} pasan el piso (name_score >= {_NAME_FLOOR})")
-
-    _print_results(ranked, query_name, query_age, query_location)
-
-
 async def main(args: argparse.Namespace) -> None:
     if not _HAS_FUZZ:
         print("[WARN] rapidfuzz no instalado — fuzzy scoring desactivado. "
               "Instalá con: pip install rapidfuzz", file=sys.stderr)
 
+    # Construir lista de nombres a procesar
     if args.archivo:
         try:
             with open(args.archivo, encoding="utf-8") as f:
                 nombres = [l.strip() for l in f if l.strip() and not l.startswith("#")]
         except FileNotFoundError:
             sys.exit(f"[ERROR] No se encontró el archivo: {args.archivo}")
+    else:
+        nombres = [args.nombre]
 
-        total = len(nombres)
-        print(f"\nArchivo: {args.archivo} — {total} nombre(s)\n{'═' * 60}")
+    total = len(nombres)
+    output_path = "output.csv"
+
+    print(f"\n{'═' * 60}")
+    print(f"  Nombres a procesar : {total}")
+    print(f"  Recall límite      : {_RECALL_LIMIT} por token")
+    print(f"  Output             : {output_path}")
+    print(f"{'═' * 60}\n")
+
+    with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=_CSV_COLUMNS)
+        writer.writeheader()
 
         for i, nombre in enumerate(nombres, 1):
-            print(f"\n{'═' * 60}")
-            print(f"  [{i}/{total}] {nombre}")
-            print(f"{'═' * 60}")
-            await _run_one(nombre, args.edad, args.ubicacion, args.limite)
-    else:
-        await _run_one(args.nombre, args.edad, args.ubicacion, args.limite)
+            print(f"[{i}/{total}] {nombre}")
+            rows = await _run_one(nombre, args.edad, args.ubicacion)
+            writer.writerows(rows)
+            csvfile.flush()
+
+    print(f"\n✓ Listo → {output_path}\n")
 
 
 if __name__ == "__main__":
@@ -258,9 +257,8 @@ if __name__ == "__main__":
     grupo = parser.add_mutually_exclusive_group(required=True)
     grupo.add_argument("nombre", nargs="?", help="Nombre a buscar (ej: 'José Rodriguez')")
     grupo.add_argument("--archivo", metavar="ARCHIVO", help="Archivo .txt con un nombre por línea")
-    parser.add_argument("--edad", type=int, default=None, help="Edad aproximada (opcional)")
-    parser.add_argument("--ubicacion", default=None, help="Ubicación (opcional, ej: 'La Guaira')")
-    parser.add_argument("--limite", type=int, default=50, help="Máx candidatos del recall por nombre (default: 50)")
+    parser.add_argument("--edad", type=int, default=None, help="Edad aproximada global (opcional)")
+    parser.add_argument("--ubicacion", default=None, help="Ubicación global (opcional, ej: 'La Guaira')")
     args = parser.parse_args()
 
     if not args.nombre and not args.archivo:
