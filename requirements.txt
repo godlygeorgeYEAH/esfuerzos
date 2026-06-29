@@ -1,3 +1,9 @@
+# torch pinned to the CPU wheel: we run InsightFace + SentenceTransformer on CPU, so
+# the default CUDA torch (~1.5GB of nvidia wheels) is dead weight that bloated the
+# image to 10GB. The CPU wheel keeps it ~3-4GB and builds faster.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 httpx==0.27.2
