@@ -56,6 +56,10 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      # Misma key que usa la API (reune-api) desde el mismo .env, para que las
+      # llamadas salientes (sendList/sendText/contacts) no reciban 401.
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
     volumes:
       - waha_data:/app/.sessions
     networks:
