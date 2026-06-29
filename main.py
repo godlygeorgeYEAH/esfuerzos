@@ -186,19 +186,13 @@ app.include_router(waha_router)
 @app.get("/health")
 async def health():
     results = {
-        "waha": False,
+        "telegram": bool(getattr(app.state, "telegram_app", None)),
         "supabase": False,
         "text_model": hasattr(app.state, "text_model") and app.state.text_model is not None,
         "face_model": hasattr(app.state, "face_model") and app.state.face_model is not None,
         "scrapers": list(getattr(app.state, "scrapers", {}).keys()),
     }
-    waha_url = settings.waha_url.rstrip("/")
     async with httpx.AsyncClient(timeout=15) as cl:
-        try:
-            r = await cl.get(f"{waha_url}/api/sessions")
-            results["waha"] = r.status_code < 500
-        except Exception:
-            pass
         try:
             r = await cl.get(
                 f"{settings.supabase_url}/rest/v1/reports?limit=0",

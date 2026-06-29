@@ -22,22 +22,14 @@ services:
       - default
       - reune_waha
 
-  waha:
-    image: devlikeapro/waha:latest
-    container_name: waha
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    volumes:
-      - waha_data:/app/.sessions
-    networks:
-      - reune_waha
+  # WAHA WhatsApp removed at the WhatsApp->Telegram cutover (2026-06-29). The intake
+  # channel is now Telegram (telegram_intake.py, long-polling). The reune_waha
+  # network is kept (external) so this compose stays valid; no WAHA container runs.
 
 volumes:
   insightface_cache:
   huggingface_cache:
   app_data:
-  waha_data:
 
 networks:
   reune_waha:

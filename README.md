@@ -1,10 +1,17 @@
 # Reúne VE
 
-Bot de WhatsApp para **reunificación familiar** tras el terremoto de Venezuela de junio 2026.
-Una familia escribe buscando a una persona; el bot le dice **si ya fue localizada en un hospital
-o refugio**, o registra la búsqueda y avisa apenas aparezca. Cruza cada búsqueda contra ~14
-fuentes (hospitales, refugios, agregadores ciudadanos) por **cédula exacta, nombre y rostro**,
-con **verificación humana obligatoria** antes de confirmarle algo a una familia.
+Bot de **Telegram** (@Reuneve_bot) para **reunificación familiar** tras el terremoto de Venezuela de
+junio 2026. Una familia escribe buscando a una persona; el bot le dice **si ya fue localizada en un
+hospital o refugio**, o registra la búsqueda y avisa apenas aparezca. Cruza cada búsqueda contra ~14+
+fuentes (hospitales, refugios, agregadores ciudadanos, la API reconexión) por **cédula exacta, nombre
+y rostro**, con **verificación humana obligatoria** antes de confirmarle algo a una familia.
+
+> **Cutover 2026-06-29: el canal de intake migró de WhatsApp (WAHA) a Telegram** (long-polling,
+> `telegram_intake.py`). WAHA fue apagado. El core de intake (`waha_intake.py`) es agnóstico de canal;
+> partes de este README aún describen el flujo vía "webhook WAHA" — la lógica (formulario, matching,
+> búsqueda, fotos) es idéntica, solo cambió el transporte. Setup del bot: token de @BotFather en
+> `TELEGRAM_BOT_TOKEN`. Herramientas admin: `/admin/dashboard` (revisión) y `/admin/search-ui` (buscador
+> + analizador de fotos), por túnel SSH detrás de `ADMIN_KEY`.
 
 > Documento maestro. Para el esquema de datos exacto ver [`DATA-MODEL.md`](DATA-MODEL.md);
 > para notas de arquitectura históricas ver [`ARCHITECTURE.md`](ARCHITECTURE.md).
@@ -291,9 +298,8 @@ Tablas principales:
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Sí | Proyecto Supabase (service role bypasa RLS) |
 | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Sí | Groq (primario) |
 | `LLM_FALLBACKS` | No | JSON de proveedores fallback (Cerebras, OpenRouter) |
-| `WAHA_URL` | No | URL interna de WAHA (`http://reune_waha:3000`) |
-| `WAHA_API_KEY` | No | Key de la API de WAHA |
-| `WAHA_WEBHOOK_SECRET` | Sí (prod) | Secreto HMAC para validar webhooks |
+| `TELEGRAM_BOT_TOKEN` | Sí (prod) | Token de @BotFather; activa el canal Telegram (long-polling) |
+| `WAHA_URL`, `WAHA_API_KEY`, `WAHA_WEBHOOK_SECRET` | No (legacy) | WAHA apagado en el cutover; sin uso |
 | `ADMIN_KEY` | Sí (prod) | Protege `/admin/*` (fail-closed) |
 | `RECONEXION_API_KEY` | No | API de integradores theempire (activa el scraper `reconexion` + `/identificar`). Solo en `.env` del VPS |
 | `HOSPITALES_ANON_KEY`, `REDAYUDA_ANON_KEY` | No | Activan scrapers opcionales |

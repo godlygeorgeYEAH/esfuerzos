@@ -16,16 +16,21 @@
 
 ## Resumen de una línea
 
-Un solo proceso FastAPI (`reune-ve-api`, :8080) que recibe reportes por **WhatsApp vía WAHA**
-(webhook `POST /webhook/waha`, HMAC `X-Webhook-Hmac` sha512) con extracción por **Groq** y
-cadena de fallback (`llm_client.py`), corre 14 scrapers + pipelines de embeddings/cara/cédula/dedup
+Un solo proceso FastAPI (`reune-ve-api`, :8080) que recibe reportes por **Telegram**
+(`telegram_intake.py`, long-polling, bot **@Reuneve_bot**) con extracción por **Groq** y
+cadena de fallback (`llm_client.py`), corre 14+ scrapers + pipelines de embeddings/cara/cédula/dedup
 en APScheduler, persiste en **Supabase** (Postgres + pgvector), y expone un **dashboard de
-aprobación humana** (`/admin/dashboard`) detrás de `ADMIN_KEY` por túnel SSH.
+aprobación humana** (`/admin/dashboard`) + un **buscador/analizador de fotos** (`/admin/search-ui`)
+detrás de `ADMIN_KEY` por túnel SSH.
+
+> **Cutover 2026-06-29:** el canal de intake migró de **WhatsApp (WAHA)** a **Telegram**. WAHA fue
+> apagado (contenedor `reune_waha` removido, servicio fuera del compose). El core de intake es
+> agnóstico de canal (`waha_intake.py` reusado por el adaptador de Telegram vía un dispatcher de envío).
 
 ## Hechos clave (la fuente de verdad es el README)
 
-- **Canal único en producción:** WAHA WhatsApp + Groq. No hay Base44. El código `api/bot/*` está
-  deprecado y no se ejecuta.
+- **Canal único en producción:** Telegram (bot @Reuneve_bot) + Groq. WAHA/WhatsApp apagado en el
+  cutover 2026-06-29. No hay Base44. El código `api/bot/*` está deprecado y no se ejecuta.
 - **Contenedor:** `reune-ve-api` (`docker-compose.yml`, `mem_limit: 2g`, repo bind-mounted en `/app`).
   Deploy = `git pull` + `docker restart`; cambio de dependencias = `docker compose up --build`.
 - **DB viva = fuente de verdad.** Las migraciones están drifted. Enums verificados en vivo:
