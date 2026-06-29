@@ -46,26 +46,32 @@
   <span style="flex:1"></span>
   <input id="key" type="password" placeholder="ADMIN_KEY" size="22">
   <button class="btn" id="save">Guardar clave</button>
+  <button class="btn" id="mode">Modo: alta confianza</button>
   <button class="btn" id="reload">Recargar</button>
 </header>
 <div id="list"><div class="empty">Ingresa tu ADMIN_KEY y pulsa Recargar.</div></div>
 <script>
 const $ = s => document.querySelector(s);
 const list = $('#list');
-// Sources that mean the person was physically located in a hospital or shelter.
-const HOSP = new Set(['pacientes_terremoto','google_drive_hospital','hospitales_ve','hospital_consolidado']);
+// Sources that mean the person was physically located in a hospital or shelter
+// (fallback; the server also sends found.is_hospital).
+const HOSP = new Set(['pacientes_terremoto','google_drive_hospital','hospitales_ve','hospital_consolidado','hospitales_26jun']);
 const getKey = () => localStorage.getItem('ak') || '';
+let MODE = localStorage.getItem('mode') || 'high';  // 'high' = cara/cédula, 'all' = incluye texto
 const pct = x => Math.round((x || 0) * 100);
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 if (getKey()) $('#key').value = getKey();
+function syncModeBtn() { $('#mode').textContent = MODE === 'high' ? 'Modo: alta confianza' : 'Modo: todos (incl. texto)'; }
+syncModeBtn();
 $('#save').onclick = () => { localStorage.setItem('ak', $('#key').value.trim()); load(); };
 $('#reload').onclick = load;
+$('#mode').onclick = () => { MODE = MODE === 'high' ? 'all' : 'high'; localStorage.setItem('mode', MODE); syncModeBtn(); load(); };
 
 function side(p, role) {
   if (!p) return `<div class="side"><h3>${role}</h3><div class="muted">sin datos</div></div>`;
-  const hosp = HOSP.has(p.source);
+  const hosp = (p.is_hospital !== undefined) ? p.is_hospital : HOSP.has(p.source);
   const dead = p.person_state === 'deceased';
   const age = p.age ? `, ${esc(p.age)} años` : '';
   const loc = esc(p.last_seen_location || 'ubicación por confirmar');
@@ -105,7 +111,7 @@ async function load() {
   if (!k) { list.innerHTML = '<div class="empty">Falta ADMIN_KEY.</div>'; return; }
   list.innerHTML = '<div class="empty">Cargando…</div>';
   try {
-    const r = await fetch('/admin/matches?status=pending&limit=100', { headers: { 'X-Admin-Key': k } });
+    const r = await fetch(`/admin/matches?status=pending&mode=${MODE}&limit=100`, { headers: { 'X-Admin-Key': k } });
     if (!r.ok) { list.innerHTML = `<div class="empty">Error ${r.status} (¿clave correcta?)</div>`; return; }
     const d = await r.json();
     const ms = d.matches || [];

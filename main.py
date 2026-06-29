@@ -267,41 +267,81 @@ async def admin_llm_approve(lead_id: str, x_admin_key: str = Header(default=""))
     return await approve_lead(lead_id, app)
 
 
+# Hospital/shelter "found" sources: a match against one of these is a real
+# reunification lead (the person was physically located), not another "se busca".
+_HOSPITAL_SOURCES = {
+    "hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
+    "google_drive_hospital", "hospitales_ve",
+}
+
+
 @app.get("/admin/matches")
 async def admin_list_matches(
     status: str = "pending",
+    mode: str = "high",
     min_score: float = 0.0,
     limit: int = 50,
     x_admin_key: str = Header(default=""),
 ):
-    """Human review queue: list matches (with both reports' details) for
-    verification. Default: pending, highest combined_score first."""
+    """Human review queue: BUSCADO ↔ ENCONTRADO candidates, best first.
+
+    The point of review is to connect a missing person to a FOUND record
+    (hospital/shelter). To keep the queue actionable we, by default:
+      - mode='high': only face matches or near-exact (combined>=0.9, e.g. cédula).
+        Text-only name guesses (the bulk) are noise at corpus scale; pass
+        mode='all' to include them.
+      - drop matches whose missing OR found side is a known duplicate
+        (raw_data.possible_duplicate_of) so the SAME person listed in several
+        sources is not reviewed many times.
+      - collapse to the single best found candidate per buscado.
+    """
     _check_admin(x_admin_key)
     sb = settings.supabase_url.rstrip("/")
     k = settings.supabase_service_role_key
     hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
+    params = {
+        "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,created_at",
+        "status": f"eq.{status}",
+        "order": "combined_score.desc",
+        "limit": "400",  # fetch wide, then dedup/collapse down to `limit`
+    }
+    if mode == "high":
+        # face match OR near-exact (cédula lands combined=1.0)
+        params["or"] = "(face_score.gt.0,combined_score.gte.0.9)"
+    elif min_score > 0:
+        params["combined_score"] = f"gte.{min_score}"
     async with httpx.AsyncClient(timeout=15) as cl:
-        r = await cl.get(f"{sb}/rest/v1/matches", headers=hdr, params={
-            "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,created_at",
-            "status": f"eq.{status}",
-            "combined_score": f"gte.{min_score}",
-            "order": "combined_score.desc",
-            "limit": str(limit),
-        })
+        r = await cl.get(f"{sb}/rest/v1/matches", headers=hdr, params=params)
         matches = r.json() if r.status_code == 200 else []
-        # Enrich with both reports' names/locations/sources
         ids = {m[k2] for m in matches for k2 in ("missing_id", "found_id") if m.get(k2)}
         reps = {}
         if ids:
             rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
                 "select": "id,full_name,age,last_seen_location,source,source_url,kind,"
-                          "distinguishing_marks,person_state",
+                          "distinguishing_marks,person_state,dup:raw_data->>possible_duplicate_of",
                 "id": f"in.({','.join(ids)})"})
             reps = {x["id"]: x for x in (rr.json() if rr.status_code == 200 else [])}
-        for m in matches:
-            m["missing"] = reps.get(m.get("missing_id"))
-            m["found"] = reps.get(m.get("found_id"))
-    return {"ok": True, "count": len(matches), "matches": matches}
+    out = []
+    seen_missing = set()
+    for m in matches:
+        miss = reps.get(m.get("missing_id"))
+        found = reps.get(m.get("found_id"))
+        if not miss or not found:
+            continue
+        # Skip cross-source duplicates of the same person (either side).
+        if miss.get("dup") or found.get("dup"):
+            continue
+        # One best (highest combined, already sorted) candidate per buscado.
+        if m.get("missing_id") in seen_missing:
+            continue
+        seen_missing.add(m.get("missing_id"))
+        found["is_hospital"] = found.get("source") in _HOSPITAL_SOURCES
+        m["missing"] = miss
+        m["found"] = found
+        out.append(m)
+        if len(out) >= limit:
+            break
+    return {"ok": True, "count": len(out), "mode": mode, "matches": out}
 
 
 @app.post("/admin/match-review")
