@@ -179,8 +179,11 @@ def parse_workbook(data: bytes) -> list[dict]:
                 person_state = "discharged"
             else:
                 person_state = "found"
-            # Stable per-row key: prefer cédula, else tab + N° + name slug.
-            key = cedula or f"{_deaccent(tab)}:{_digits(cell('name')) or _deaccent(name)[:24]}"
+            # Stable per-row key, ALWAYS namespaced by tab so the same person
+            # listed in two hospitals yields two rows (different location), while
+            # an exact in-tab repeat collapses. Prefer cédula, else name slug.
+            tab_slug = _deaccent(tab)[:24]
+            key = f"{tab_slug}:{cedula or _deaccent(name)[:28]}"
             out.append({
                 "kind": "found",
                 "full_name": name,
@@ -195,7 +198,12 @@ def parse_workbook(data: bytes) -> list[dict]:
                              "telefono": phone or None, "observaciones": obs or None,
                              "person_state": person_state},
             })
-    return out
+    # Dedup by source_url: a batch upsert with ON CONFLICT cannot touch the same
+    # (source, source_url) twice, so collapse exact repeats (last wins).
+    deduped: dict[str, dict] = {}
+    for rec in out:
+        deduped[rec["source_url"]] = rec
+    return list(deduped.values())
 
 
 class HospitalConsolidadoScraper(BaseVEScraper):
