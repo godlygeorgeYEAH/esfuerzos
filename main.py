@@ -96,6 +96,13 @@ async def lifespan(app: FastAPI):
         run_text_cross_match, IntervalTrigger(seconds=3600),
         args=[app], id="text_cross_match", max_instances=1,
     )
+    # Cédula exact match: the strongest signal — connects a family's report to a
+    # hospital/shelter record with the same national ID. Runs continuously so new
+    # hospital data (which carries cédula) auto-matches without manual triggering.
+    scheduler.add_job(
+        run_cedula_exact_match, IntervalTrigger(seconds=1800),
+        args=[app], id="cedula_exact_match", max_instances=1,
+    )
 
     # Background deduplication: cluster near-duplicate reports across scrapers
     # and annotate non-canonical rows so fuzzy search/review can collapse them.
