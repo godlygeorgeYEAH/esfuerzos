@@ -22,7 +22,8 @@ CREATE TYPE report_kind  AS ENUM ('missing', 'found');
 -- four are accepted; 'found' and 'discharged' are REJECTED (400). Scrapers write
 -- 'alive' for located patients. Do not assume 'found'/'discharged' exist.
 CREATE TYPE person_state AS ENUM ('unknown', 'alive', 'injured', 'deceased');
-CREATE TYPE match_status AS ENUM ('pending', 'confirmed', 'rejected');
+-- match_status verified live (2026-06-29): 'rejected' is NOT valid (use 'dismissed').
+CREATE TYPE match_status AS ENUM ('pending', 'confirmed', 'dismissed', 'found');
 
 CREATE TABLE reports (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),

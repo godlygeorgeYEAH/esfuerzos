@@ -56,7 +56,7 @@ erDiagram
         real text_score
         real face_score
         real combined_score
-        match_status status "pending|confirmed|rejected"
+        match_status status "pending|confirmed|dismissed|found"
         text reviewer "quien aprobo (dashboard)"
         timestamptz reviewed_at
         bool notify_sent "el notifier ya aviso a la familia"
@@ -107,7 +107,7 @@ erDiagram
 ## Enums (tipos Postgres)
 - `report_kind`: `missing` | `found`
 - `person_state`: `unknown` | `alive` | `injured` | `deceased` (enum vivo verificado 2026-06-29; `found`/`discharged` NO son válidos, los rechaza con 400)
-- `match_status`: `pending` | `confirmed` | `rejected`
+- `match_status`: `pending` | `confirmed` | `dismissed` | `found` (verificado vivo 2026-06-29; `rejected` NO es válido, usar `dismissed`)
 
 ## Flujo de datos
 1. **Ingesta** → todo aterriza en `reports` (scrapers + `waha_whatsapp` + `llm_approved`). `source` marca el canal; único por `(source, source_url)`.

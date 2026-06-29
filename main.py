@@ -375,13 +375,15 @@ async def admin_match_review(
     decision: str,
     x_admin_key: str = Header(default=""),
 ):
-    """Human review of a match. decision:
-      - 'confirmed': valid match -> the notifier alerts both families.
-      - 'rejected':  false positive -> dropped, no notification.
-      - 'found':     the searched person was located -> flip their report to
-                     person_state='found' (so they stop showing as missing) and
-                     record the match as 'found'. The family is deliberately NOT
-                     notified — that is what 'confirmed' is for."""
+    """Human review of a match. `decision` is the reviewer's intent (logged
+    verbatim); it maps to the live match_status enum, which is
+    {pending, confirmed, dismissed, found} — note there is NO 'rejected':
+      - 'confirmed': valid match -> status=confirmed -> the notifier alerts the family.
+      - 'rejected':  false positive -> status=dismissed (NOT 'rejected', which 400s).
+      - 'found':     the searched person was located -> status=found. The notifier
+                     only fires on 'confirmed', so a 'found' match is recorded but the
+                     family is deliberately NOT notified. person_state is never set to
+                     'found' (that value is not in the person_state enum)."""
     _check_admin(x_admin_key)
     if decision not in ("confirmed", "rejected", "found"):
         raise HTTPException(status_code=400, detail="decision must be confirmed|rejected|found")
@@ -391,16 +393,11 @@ async def admin_match_review(
     k = settings.supabase_service_role_key
     read_hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
     write_hdr = {**read_hdr, "Content-Type": "application/json", "Prefer": "return=minimal"}
-    # 'found' = a real located-person match the family is NOT alerted about. The
-    # match_status enum is pending|confirmed|rejected (there is no 'found'), and
-    # person_state has no 'found' value either, so record it as confirmed +
-    # notify_sent=true (the notifier skips it). Previously this wrote status='found'
-    # and person_state='found', BOTH rejected by the enums → the feature 400'd.
-    if decision == "found":
-        payload = {"status": "confirmed", "notify_sent": True,
-                   "reviewer": "dashboard", "reviewed_at": now}
-    else:
-        payload = {"status": decision, "reviewer": "dashboard", "reviewed_at": now}
+    # Map the UI decision to the live match_status enum value. 'rejected' is NOT a
+    # valid enum member (use 'dismissed'); 'found'/'confirmed' are valid as-is.
+    _STATUS = {"confirmed": "confirmed", "rejected": "dismissed", "found": "found"}
+    db_status = _STATUS[decision]
+    payload = {"status": db_status, "reviewer": "dashboard", "reviewed_at": now}
     async with httpx.AsyncClient(timeout=15) as cl:
         # Always fetch both sides upfront: needed for the audit log and for
         # the 'found' branch that resolves the located person's other candidates.
@@ -418,14 +415,14 @@ async def admin_match_review(
                               json=payload)
         ok = resp.status_code in (200, 204)
 
-        # 'found': the searched person is located → auto-reject their OTHER pending
+        # 'found': the searched person is located → auto-dismiss their OTHER pending
         # candidates so they stop appearing in the queue (replaces the old invalid
-        # person_state='found' flag).
+        # person_state='found' flag). 'dismissed' is the valid enum value.
         if decision == "found" and missing_id:
             await cl.patch(f"{sb}/rest/v1/matches", headers=write_hdr,
                            params={"missing_id": f"eq.{missing_id}",
                                    "status": "eq.pending", "id": f"neq.{match_id}"},
-                           json={"status": "rejected", "reviewer": "dashboard", "reviewed_at": now})
+                           json={"status": "dismissed", "reviewer": "dashboard", "reviewed_at": now})
 
         # Write audit log entry — best-effort, never fails the review itself.
         try:

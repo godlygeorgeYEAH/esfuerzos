@@ -246,7 +246,7 @@ Tablas principales:
   `source_url` (único con `source`), `text_embedding` vector(768), `raw_data`.
 - **`photos`** — fotos + `face_embedding` vector(512).
 - **`matches`** — pares `missing_id`/`found_id` + `text_score`/`face_score`/`combined_score`,
-  `status` (pending/confirmed/rejected), `reviewer`, `notify_sent`.
+  `status` (enum vivo: `pending`/`confirmed`/`dismissed`/`found`; `rejected` NO es válido), `reviewer`, `notify_sent`.
 - **`bot_subscribers`** — `report_id` → teléfono del familiar (para notificar).
 - **`waha_sessions`** — estado del formulario por teléfono.
 - **`llm_leads`** — cola de revisión del panel LLM.
@@ -265,7 +265,7 @@ Tablas principales:
 | `POST /webhook/waha` | POST | HMAC sha512 | Webhook entrante de WhatsApp |
 | `GET /admin/dashboard` | GET | (shell público, datos por clave) | Panel de aprobación humana |
 | `GET /admin/matches` | GET | X-Admin-Key | Cola de coincidencias (modos high/hospital/all) |
-| `POST /admin/match-review` | POST | X-Admin-Key | Decidir un match: `confirmed` (notifica) / `rejected` / `found` (localizado, sin notificar) |
+| `POST /admin/match-review` | POST | X-Admin-Key | Decidir un match (`decision`): `confirmed` (→status confirmed, notifica) / `rejected` (→status **dismissed**) / `found` (→status found, localizado sin notificar) |
 | `GET /admin/review-log` | GET | X-Admin-Key | Log de auditoría de decisiones (paginado) |
 | `GET /admin/photo/{report_id}` | GET | X-Admin-Key (header) | Proxy de foto (gated; key solo por header, no en URL) |
 | `POST /admin/consolidate` | POST | X-Admin-Key | Corre fases de embedding/match |
