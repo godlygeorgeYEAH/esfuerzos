@@ -41,8 +41,9 @@
 </head>
 <body>
 <header>
-  <h1>Reúne VE · Revisión humana</h1>
+  <h1>Reúne VE · Revisión humana <span class="muted" style="font-size:11px">v2</span></h1>
   <span id="count" class="muted"></span>
+  <span id="toast" style="display:none;padding:4px 10px;border-radius:6px;font-weight:700;font-size:13px"></span>
   <span style="flex:1"></span>
   <input id="key" type="password" placeholder="ADMIN_KEY" size="22">
   <button class="btn" id="save">Guardar clave</button>
@@ -137,6 +138,7 @@ list.addEventListener('click', async (ev) => {
       { method: 'POST', headers: { 'X-Admin-Key': getKey() } });
     const d = await r.json();
     if (d.ok) {
+      toast(decision === 'confirmed' ? '✓ Aprobado · familia será notificada' : '✕ Rechazado', decision === 'confirmed' ? '#1f7a44' : '#7a2b2b');
       cardEl.remove();
       const left = list.querySelectorAll('.card').length;
       $('#count').textContent = left + ' pendientes';
@@ -144,6 +146,12 @@ list.addEventListener('click', async (ev) => {
     } else { cardEl.style.opacity = 1; alert('No se pudo: ' + JSON.stringify(d)); }
   } catch (e) { cardEl.style.opacity = 1; alert('Error de red'); }
 });
+
+function toast(msg, color) {
+  const t = $('#toast');
+  t.textContent = msg; t.style.background = color || '#243140'; t.style.color = '#fff'; t.style.display = '';
+  clearTimeout(t._h); t._h = setTimeout(() => { t.style.display = 'none'; }, 3000);
+}
 
 if (getKey()) load();
 </script>

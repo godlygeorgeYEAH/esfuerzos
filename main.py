@@ -393,7 +393,8 @@ _DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "admin_dashboard.html"
 async def admin_dashboard():
     try:
         with open(_DASHBOARD_PATH, encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            # no-store so a reviewer never gets a stale cached UI after a deploy
+            return HTMLResponse(f.read(), headers={"Cache-Control": "no-store, max-age=0"})
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="dashboard asset missing")
 
