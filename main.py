@@ -436,10 +436,11 @@ async def admin_match_review(
                 "missing_source": reps.get(missing_id, {}).get("source"),
                 "found_source": reps.get(found_id, {}).get("source"),
             }
-            log_hdr = {**write_hdr, "Prefer": "return=minimal"}
-            await cl.post(f"{sb}/rest/v1/match_review_log", headers=log_hdr, json=log_row)
+            lr = await cl.post(f"{sb}/rest/v1/match_review_log", headers=write_hdr, json=log_row)
+            if lr.status_code not in (200, 201):
+                logger.warning("review log write failed: %s %s", lr.status_code, lr.text)
         except Exception as exc:
-            logger.warning("review log write failed: %s", exc)
+            logger.warning("review log write exception: %s", exc)
 
     return {"ok": ok, "match_id": match_id, "status": decision}
 
