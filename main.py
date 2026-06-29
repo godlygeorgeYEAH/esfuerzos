@@ -613,5 +613,115 @@ async def admin_photo(report_id: str, x_admin_key: str = Header(default="")):
                     headers={"Cache-Control": "private, max-age=300"})
 
 
+# ---------------------------------------------------------------------------
+# Admin search tool: manual person lookup (name/cédula) + photo analyzer.
+# Lets a reviewer check "is this person already located?" without the bot.
+# ---------------------------------------------------------------------------
+_SEARCH_PATH = os.path.join(os.path.dirname(__file__), "admin_search.html")
+
+
+@app.get("/admin/search-ui", response_class=HTMLResponse)
+async def admin_search_ui():
+    try:
+        with open(_SEARCH_PATH, encoding="utf-8") as f:
+            return HTMLResponse(f.read(), headers={"Cache-Control": "no-store, max-age=0"})
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="search UI missing")
+
+
+@app.get("/admin/search")
+async def admin_search(q: str, limit: int = 60, x_admin_key: str = Header(default="")):
+    """Search reports by name (ilike) or cédula (q with >=6 digits). Returns matches
+    enriched with hospital flag + source link, located rows (found/hospital) first."""
+    _check_admin(x_admin_key)
+    import re as _re
+    q = (q or "").strip()
+    if not q:
+        return {"q": q, "count": 0, "results": []}
+    sb = settings.supabase_url.rstrip("/")
+    k = settings.supabase_service_role_key
+    hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
+    sel = "id,kind,full_name,age,last_seen_location,source,source_url,person_state,distinguishing_marks"
+    digits = _re.sub(r"\D", "", q)
+    params = {"select": sel, "limit": str(max(1, min(limit, 200)))}
+    if len(digits) >= 6:
+        mode = "cedula"
+        params["distinguishing_marks"] = f"ilike.*{digits}*"
+    else:
+        mode = "name"
+        params["full_name"] = f"ilike.*{q}*"
+    async with httpx.AsyncClient(timeout=20) as cl:
+        r = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params=params)
+        rows = r.json() if r.status_code == 200 else []
+    for rep in rows:
+        src = rep.get("source") or ""
+        rep["is_hospital"] = src in _HOSPITAL_SOURCES
+        rep["source_link"] = resolve_source_url(src, rep.get("source_url"))
+    rows.sort(key=lambda x: (0 if x.get("is_hospital") else 1 if x.get("kind") == "found" else 2))
+    return {"q": q, "mode": mode, "count": len(rows), "results": rows}
+
+
+@app.post("/admin/search-photo")
+async def admin_search_photo(payload: dict, x_admin_key: str = Header(default="")):
+    """Analyze an uploaded photo: face-match against ALL reports (local InsightFace)
+    + the reconexión registry (/identificar). Returns ranked candidates for human
+    judgment. payload: {photo: 'data:image/...;base64,...'}."""
+    _check_admin(x_admin_key)
+    import base64 as _b64
+    import re as _re
+    from face_pipeline import embed_photo_from_bytes, _sb_rpc
+    m = _re.match(r"data:[^;]+;base64,(.+)", payload.get("photo") or "", _re.DOTALL)
+    if not m:
+        raise HTTPException(status_code=400, detail="photo must be a base64 data URL")
+    try:
+        raw = _b64.b64decode(m.group(1))
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid base64")
+    out: dict = {"face": False, "local": [], "reconexion": None}
+    result = await embed_photo_from_bytes(raw, app.state.face_model)
+    out["face"] = bool(result)
+    sb = settings.supabase_url.rstrip("/")
+    k = settings.supabase_service_role_key
+    hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
+    if result:
+        seen: set = set()
+        async with httpx.AsyncClient(timeout=30) as cl:
+            for kind in ("missing", "found"):
+                try:
+                    cands = await _sb_rpc(cl, sb, k, "match_reports_by_face", {
+                        "query_embedding": result["embedding"], "query_kind": kind,
+                        "match_threshold": 0.40, "match_count": 12})
+                except Exception as exc:
+                    logger.warning("search-photo rpc %s: %s", kind, exc)
+                    continue
+                ids = [c["report_id"] for c in cands if c.get("report_id") and c["report_id"] not in seen]
+                details: dict = {}
+                if ids:
+                    rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
+                        "id": f"in.({','.join(ids)})",
+                        "select": "id,kind,full_name,age,last_seen_location,source,source_url,person_state"})
+                    if rr.status_code == 200:
+                        details = {d["id"]: d for d in rr.json()}
+                for c in cands:
+                    rid = c.get("report_id")
+                    if not rid or rid in seen:
+                        continue
+                    seen.add(rid)
+                    d = details.get(rid, {"id": rid})
+                    d["score"] = round(float(c.get("similarity", 0)), 4)
+                    d["is_hospital"] = (d.get("source") or "") in _HOSPITAL_SOURCES
+                    d["source_link"] = resolve_source_url(d.get("source", ""), d.get("source_url"))
+                    out["local"].append(d)
+        out["local"].sort(key=lambda x: -x.get("score", 0))
+    # External reconexión face engine (best-effort; minor governance honored upstream)
+    try:
+        import reconexion_client as rc
+        if rc.enabled():
+            out["reconexion"] = await rc.identificar(raw, content_type="image/jpeg", es_menor=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("search-photo reconexion: %s", exc)
+    return out
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)

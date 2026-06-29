@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reúne VE · Buscador</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, "Segoe UI", Roboto, sans-serif; margin: 0; background: #0f1216; color: #e7edf3; }
+  header { position: sticky; top: 0; z-index: 5; background: #161b22; padding: 12px 16px;
+           border-bottom: 1px solid #2a313a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  .muted { color: #8b97a6; font-size: 13px; }
+  input, button { font: inherit; }
+  input { background: #0f1216; border: 1px solid #2a313a; color: #e7edf3; padding: 7px 9px; border-radius: 6px; }
+  button { cursor: pointer; border: 0; border-radius: 6px; padding: 8px 13px; font-weight: 600; background: #243140; color: #cfe1f2; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  .panel { background: #161b22; border: 1px solid #2a313a; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 10px; color: #cfe1f2; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1; min-width: 200px; }
+  .card { background: #11161c; border: 1px solid #2a313a; border-radius: 8px; padding: 10px 12px; margin-top: 8px;
+          display: flex; gap: 12px; align-items: flex-start; }
+  .card img { width: 84px; height: 84px; object-fit: cover; border-radius: 6px; background: #0b0e12; flex-shrink: 0; }
+  .name { font-size: 16px; font-weight: 700; }
+  .field { font-size: 13px; color: #c2cdd9; margin: 2px 0; }
+  .badge { padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 700; display: inline-block; }
+  .b-hosp { background: #173a2a; color: #5be39b; } .b-miss { background: #3a3417; color: #e3cf5b; }
+  .b-found { background: #1d2f45; color: #7db4ff; } .b-dead { background: #3a1717; color: #ff8d8d; }
+  .b-score { background: #2a2540; color: #c9b6ff; }
+  a { color: #7db4ff; word-break: break-all; }
+  .empty { color: #8b97a6; padding: 16px 4px; }
+  .located { border-left: 3px solid #1f7a44; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reúne VE · Buscador <span class="muted" style="font-size:11px">manual</span></h1>
+  <span style="flex:1"></span>
+  <input id="key" type="password" placeholder="ADMIN_KEY" size="22">
+  <button id="save">Guardar clave</button>
+  <a href="/admin/dashboard" style="margin-left:8px">← Dashboard</a>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Buscar por nombre o cédula</h2>
+    <div class="row">
+      <input id="q" class="grow" placeholder="Nombre y apellido, o cédula (solo dígitos)">
+      <button id="go">Buscar</button>
+    </div>
+    <div id="results"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Analizar una foto (¿contra quién coincide?)</h2>
+    <div class="row">
+      <input id="photo" type="file" accept="image/*" class="grow">
+      <button id="analyze">Analizar foto</button>
+    </div>
+    <div id="photo-results"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const getKey = () => localStorage.getItem('ak') || '';
+if (getKey()) $('#key').value = getKey();
+$('#save').onclick = () => { localStorage.setItem('ak', $('#key').value.trim()); };
+const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const pct = x => Math.round((x || 0) * 100);
+
+function badges(p, score) {
+  let b = '';
+  if (score !== undefined) b += `<span class="badge b-score">cara ${pct(score)}%</span> `;
+  if (p.is_hospital) b += '<span class="badge b-hosp">🏥 EN HOSPITAL/REFUGIO</span> ';
+  else if (p.kind === 'found') b += '<span class="badge b-found">ENCONTRADO</span> ';
+  else if (p.kind === 'missing') b += '<span class="badge b-miss">SE BUSCA</span> ';
+  if (p.person_state === 'deceased') b += '<span class="badge b-dead">✝ FALLECIDO/A</span> ';
+  return b;
+}
+function card(p, score) {
+  const located = p.is_hospital || p.kind === 'found';
+  const age = p.age ? `, ${esc(p.age)} años` : '';
+  const loc = esc(p.last_seen_location || 'ubicación por confirmar');
+  const link = p.source_link && /^https?:\/\//.test(p.source_link)
+    ? ` · <a href="${esc(p.source_link)}" target="_blank" rel="noopener">${esc(p.source)}</a>` : ` · ${esc(p.source || '')}`;
+  const marks = p.distinguishing_marks ? `<div class="field muted">${esc(p.distinguishing_marks)}</div>` : '';
+  return `<div class="card ${located ? 'located' : ''}">
+    <img data-pid="${esc(p.id)}" onerror="this.style.display='none'">
+    <div><div>${badges(p, score)}</div>
+    <div class="name">${esc(p.full_name || '(sin nombre)')}${age}</div>
+    <div class="field">📍 ${loc}${link}</div>${marks}</div></div>`;
+}
+function hydrate(root) {
+  root.querySelectorAll('img[data-pid]').forEach(async im => {
+    try {
+      const r = await fetch(`/admin/photo/${im.dataset.pid}`, { headers: { 'X-Admin-Key': getKey() } });
+      if (!r.ok) { im.style.display = 'none'; return; }
+      im.src = URL.createObjectURL(await r.blob());
+    } catch (e) { im.style.display = 'none'; }
+  });
+}
+
+async function search() {
+  const k = getKey(); const q = $('#q').value.trim();
+  if (!k) { $('#results').innerHTML = '<div class="empty">Falta ADMIN_KEY.</div>'; return; }
+  if (!q) return;
+  $('#results').innerHTML = '<div class="empty">Buscando…</div>';
+  try {
+    const r = await fetch(`/admin/search?q=${encodeURIComponent(q)}`, { headers: { 'X-Admin-Key': k } });
+    if (!r.ok) { $('#results').innerHTML = `<div class="empty">Error ${r.status}</div>`; return; }
+    const d = await r.json();
+    if (!d.results.length) { $('#results').innerHTML = '<div class="empty">Sin resultados. (Ojo: solo lo que el bot ya ingirió.)</div>'; return; }
+    const located = d.results.filter(p => p.is_hospital || p.kind === 'found').length;
+    $('#results').innerHTML = `<div class="muted" style="margin:8px 0">${d.count} resultados · ${located} localizado(s)/encontrado(s) (modo: ${d.mode})</div>`
+      + d.results.map(p => card(p)).join('');
+    hydrate($('#results'));
+  } catch (e) { $('#results').innerHTML = '<div class="empty">Error de red.</div>'; }
+}
+$('#go').onclick = search;
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+
+async function analyze() {
+  const k = getKey(); const f = $('#photo').files[0];
+  if (!k) { $('#photo-results').innerHTML = '<div class="empty">Falta ADMIN_KEY.</div>'; return; }
+  if (!f) { $('#photo-results').innerHTML = '<div class="empty">Elige una foto.</div>'; return; }
+  $('#photo-results').innerHTML = '<div class="empty">Analizando rostro…</div>';
+  const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(f); });
+  try {
+    const r = await fetch('/admin/search-photo', { method: 'POST',
+      headers: { 'X-Admin-Key': k, 'Content-Type': 'application/json' }, body: JSON.stringify({ photo: dataUrl }) });
+    const d = await r.json();
+    if (!r.ok) { $('#photo-results').innerHTML = `<div class="empty">Error ${r.status}: ${esc(JSON.stringify(d))}</div>`; return; }
+    if (!d.face) { $('#photo-results').innerHTML = '<div class="empty">No se detectó un rostro en la foto.</div>'; return; }
+    let html = '';
+    html += `<div class="muted" style="margin:8px 0">Coincidencias locales (InsightFace): ${d.local.length}</div>`;
+    html += d.local.length ? d.local.map(p => card(p, p.score)).join('') : '<div class="empty">Sin coincidencias locales.</div>';
+    const rec = d.reconexion;
+    if (rec) {
+      if (rec.needsReview) {
+        html += '<div class="muted" style="margin:12px 0 6px">Reconexión: ⚠ requiere revisión humana (posible menor) — sin candidatos por gobernanza.</div>';
+      } else {
+        const rr = (rec.results || []);
+        html += `<div class="muted" style="margin:12px 0 6px">Reconexión (registro curado): ${rr.length} (umbral fuerte ${rec.strongThreshold || 0.72})</div>`;
+        html += rr.length ? rr.map(m => {
+          const p = m.persona || {};
+          return `<div class="card ${m.strongMatch ? 'located' : ''}">
+            <div><div><span class="badge b-score">cara ${pct(m.score)}%</span> ${m.strongMatch ? '<span class="badge b-hosp">FUERTE</span>' : ''} <span class="badge b-found">reconexión</span></div>
+            <div class="name">${esc(p.nombre || '(sin nombre)')}</div>
+            <div class="field">estado: ${esc(p.estado || '?')}${p.cedula ? ' · ' + esc(p.cedula) : ''}</div></div></div>`;
+        }).join('') : '<div class="empty">Sin coincidencias en reconexión.</div>';
+      }
+    }
+    $('#photo-results').innerHTML = html;
+    hydrate($('#photo-results'));
+  } catch (e) { $('#photo-results').innerHTML = '<div class="empty">Error de red.</div>'; }
+}
+$('#analyze').onclick = analyze;
+</script>
+</body>
+</html>
