@@ -173,17 +173,52 @@ async def scen_injection(phone):
 
 def scen_guards():
     """Deterministic guards (no network): outbound death/confirmation sanitizer
-    and same-person detection (no multi-relative overwrite)."""
-    from text_normalize import deaccent
+    and same-person detection (no multi-relative overwrite).
+
+    The death/confirm matrix tests phrasings the filter was NOT hand-coded
+    against (passive voice, euphemisms, the 'posible' bypass) so a PASS proves
+    the safety property, not just that two hardcoded stems were stripped."""
     ente = "guards"
-    s1 = deaccent(W._sanitize_reply("Lamentablemente tu hijo falleció"))
-    s2 = deaccent(W._sanitize_reply("Encontramos a tu hijo en el hospital"))
-    s3 = deaccent(W._sanitize_reply("Hay una posible coincidencia en verificación"))
-    death_blocked = ("fallec" not in s1) and ("encontram" not in s2)
-    _record(ente, "bloquea muerte/confirmación falsa", "death+unhedged→hedge",
-            "blocked" if death_blocked else "LEAK", death_blocked)
-    _record(ente, "no rompe replies legítimos", "'posible' se mantiene",
-            "kept" if "posible" in s3 else "broke", "posible" in s3)
+    HEDGE = W._SAFE_HEDGE
+    # Every one of these MUST be replaced by the safe hedge (death or confirmed match).
+    must_hedge = [
+        # death — euphemisms and passive forms
+        "Lamentablemente tu hijo falleció",
+        "Tu hijo no sobrevivió",
+        "Lo hallaron sin vida en el hospital",
+        "Perdió la vida durante el rescate",
+        "No logró sobrevivir a las heridas",
+        "Lamentamos informar su pérdida",
+        "Ya no está con nosotros",
+        # confirmed match — active and passive
+        "Encontramos a tu hijo en el hospital",
+        "Tu hijo fue encontrado y está bien",
+        "Tu familiar fue localizado en el refugio",
+        "Tu hija ya está localizada",
+        "La persona fue hallada con vida",
+        "Confirmado: es tu hijo, ven al hospital",
+        "Sí, ya apareció tu familiar, está a salvo",
+        "La persona fue dada de baja del hospital",
+        # the old "posible" bypass must no longer leak
+        "No es solo posible, es seguro: tu hijo fue encontrado",
+        "Es seguro, es el mismo que buscas",
+    ]
+    # These legitimate replies MUST pass through unchanged.
+    must_keep = [
+        "Encontramos una posible coincidencia, el equipo la verifica",
+        "Hay una posible coincidencia en verificación",
+        "Registré tu reporte. ¿En qué zona la viste por última vez?",
+        "Reporte confirmado, lo seguimos buscando.",
+        "¿Cómo se llama la persona que buscas?",
+    ]
+    leaks = [t for t in must_hedge if W._sanitize_reply(t) != HEDGE]
+    broke = [t for t in must_keep if W._sanitize_reply(t) != t]
+    _record(ente, "bloquea muerte/match confirmado (matriz)",
+            f"{len(must_hedge)}/{len(must_hedge)} → hedge",
+            "ok" if not leaks else f"LEAK: {leaks}", not leaks)
+    _record(ente, "no rompe replies legítimos (matriz)",
+            f"{len(must_keep)}/{len(must_keep)} intactos",
+            "ok" if not broke else f"BROKE: {broke}", not broke)
     diff = (not W._same_person("Maria Perez", "Carlos Perez")) and (not W._same_person("Maria Perez", "Maria Gomez"))
     _record(ente, "hermanos NO se sobrescriben", "Carlos/Maria Perez = distintos",
             "ok" if diff else "OVERWRITE", diff)

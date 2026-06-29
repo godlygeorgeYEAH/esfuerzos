@@ -358,22 +358,49 @@ def _is_duplicate(msg_id: str) -> bool:
 # Outbound safety guard (audit blocker): the LLM reply is free text. A jailbreak
 # or hallucination must NEVER tell a family someone died or assert a confirmed
 # match. This deterministic filter runs on every LLM-derived reply before send.
-_DEATH_TOKENS = ("fallec", "muert", "occiso", "difunt", "deceased", "deces")
-_UNHEDGED_CONFIRM = ("encontram", "localizam", "es el mismo", "es la misma",
-                     "es tu familiar", "lo encontr", "la encontr", "dado de baja")
+# Tokens are matched against the deaccented (lowercase, no-accent) reply via
+# substring. Death includes euphemisms; passive voice is covered alongside the
+# active/first-person stems, since a jailbreak or hallucination will phrase the
+# confirmation however it likes ("fue encontrado", "lo hallaron sin vida").
+_DEATH_TOKENS = (
+    "fallec", "muert", "occiso", "difunt", "deceased", "deces",
+    "sin vida", "no sobrevivi", "no logro sobrevivi",
+    "perdio la vida", "perdieron la vida", "su perdida",
+    "en paz descanse", "qepd", "q.e.p.d", "no esta con nosotros",
+)
+# Identity / life / status assertions the bot must NEVER make. Catastrophic
+# regardless of any "posible coincidencia" qualifier elsewhere → hedge always.
+_HARD_CONFIRM = (
+    "a salvo", "sano y salvo", "con vida", "esta vivo", "esta viva",
+    "dado de baja", "dada de baja",
+    "es el mismo", "es la misma", "es tu familiar", "es tu hijo", "es tu hija",
+    "es seguro", "con certeza", "te aseguro", "garantiz", "100% seguro",
+)
+# Found / located verbs (active + passive). Acceptable ONLY when the reply also
+# carries the mandated hedge phrase "posible coincidencia"; otherwise they
+# over-assert a match. Requiring the full phrase (not just the word "posible")
+# closes the bypass where any stray "posible" disabled the whole guard.
+_SOFT_CONFIRM = (
+    "encontram", "localizam", "lo encontr", "la encontr",
+    "encontrad", "localizad", "hallad", "hallaron", "aparecio",
+)
 _SAFE_HEDGE = ("Gracias por la información, la registré. Cualquier coincidencia es "
                "preliminar y la verifica el equipo Reúne VE antes de confirmarte nada.")
 
 
 def _sanitize_reply(text: str) -> str:
-    """Replace any LLM reply that states death or an unhedged confirmation with a
-    safe hedge. Conservative: false hope / false grief is the worst-case harm."""
+    """Replace any LLM reply that states death, asserts a confirmed match, or
+    confirms a found-person without the mandated 'posible coincidencia' hedge.
+    Conservative by design: false hope / false grief is the worst-case harm, so
+    over-hedging is acceptable and under-hedging is not."""
     if not text:
         return text
     d = _deaccent_shared(text)
     if any(t in d for t in _DEATH_TOKENS):
         return _SAFE_HEDGE
-    if "posible" not in d and any(t in d for t in _UNHEDGED_CONFIRM):
+    if any(t in d for t in _HARD_CONFIRM):
+        return _SAFE_HEDGE
+    if "posible coincidencia" not in d and any(t in d for t in _SOFT_CONFIRM):
         return _SAFE_HEDGE
     return text
 
