@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     waha_api_key: str = ""
     waha_webhook_secret: str = ""
     waha_session: str = "default"
+    # Telegram intake channel (Bot API, long-polling). Set the token (from @BotFather)
+    # to enable; created in main.py lifespan. Replaces WAHA as the intake channel.
+    telegram_bot_token: str = ""
     # Matching thresholds
     face_match_threshold: float = 0.50
     text_match_threshold: float = 0.75

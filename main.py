@@ -136,10 +136,24 @@ async def lifespan(app: FastAPI):
         )
 
     asyncio.create_task(_startup_sweep(scrapers))
-    logger.info("Startup complete: %d scraper jobs, WAHA transport active", len(scheduler.get_jobs()))
+
+    # Telegram intake channel (long-polling). Started only if TELEGRAM_BOT_TOKEN is
+    # set. Coexists with WAHA until the WhatsApp->Telegram cutover.
+    app.state.telegram_app = None
+    try:
+        from telegram_intake import start_polling
+        app.state.telegram_app = await start_polling(app)
+    except Exception as exc:  # noqa: BLE001 - never block startup on the channel
+        logger.error("Telegram start failed: %s", exc)
+
+    logger.info("Startup complete: %d scraper jobs; telegram=%s",
+                len(scheduler.get_jobs()), bool(app.state.telegram_app))
 
     yield
 
+    if getattr(app.state, "telegram_app", None):
+        from telegram_intake import stop_polling
+        await stop_polling(app.state.telegram_app)
     scheduler.shutdown(wait=False)
     for scraper in scrapers.values():
         await scraper.close()

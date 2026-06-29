@@ -112,15 +112,20 @@ async def _match_exists(client: httpx.AsyncClient, sb_url: str, sb_key: str,
 
 
 async def identify_and_store(report_id: str, photo_url: str, app: Any,
-                             is_minor: bool = False) -> int:
+                             is_minor: bool = False, image_bytes: bytes | None = None,
+                             content_type: str = "image/jpeg") -> int:
     """Run /identificar for one report's photo; store strong matches as pending rows.
+    Pass image_bytes to skip the download (e.g. Telegram already has the bytes).
     Returns the number of matches created. Best-effort; never raises."""
     if not rc.enabled():
         return 0
     sb_url = app.state.supabase_url.rstrip("/")
     sb_key = app.state.supabase_service_key
     try:
-        img, ctype = await _download(photo_url)
+        if image_bytes is not None:
+            img, ctype = image_bytes, content_type
+        else:
+            img, ctype = await _download(photo_url)
         if not img:
             return 0
         res = await rc.identificar(img, content_type=ctype, es_menor=is_minor)

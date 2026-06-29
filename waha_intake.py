@@ -852,7 +852,33 @@ async def _register_subscriber(report_id: str, phone: str, data: dict) -> None:
         logger.warning("register_subscriber failed: %s", exc)
 
 
+# Channel send dispatcher. The intake core is transport-agnostic: it always calls
+# _waha_send(chat_key, text). chat_key "tg:<id>" routes to Telegram (a sender the
+# telegram adapter registers at startup), anything else to WhatsApp via WAHA. Keeps
+# the 1300-line core untouched while supporting a second channel.
+_TG_SENDER = None  # set by telegram_intake.register_telegram_sender
+
+
+def register_telegram_sender(fn) -> None:
+    global _TG_SENDER
+    _TG_SENDER = fn
+
+
 async def _waha_send(phone: str, text: str) -> bool:
+    """Send a message to a chat key. Dispatches tg:<id> -> Telegram, else WhatsApp."""
+    if phone.startswith("tg:"):
+        if _TG_SENDER is None:
+            logger.warning("telegram sender not registered; dropping message to %s", _hp(phone))
+            return False
+        try:
+            return await _TG_SENDER(phone[3:], text)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("telegram send failed: %s", exc)
+            return False
+    return await _waha_send_whatsapp(phone, text)
+
+
+async def _waha_send_whatsapp(phone: str, text: str) -> bool:
     """Send a WhatsApp text via WAHA. Returns True on success, False otherwise."""
     waha = settings.waha_url.rstrip("/")
     chat_id = phone if "@" in phone else f"{phone}@c.us"
@@ -886,10 +912,12 @@ def _extract_media_url(payload: dict) -> str:
 
 
 async def _handle_photo(phone: str, media_url: str, report_id: str | None,
-                        app: Any, has_body: bool) -> None:
+                        app: Any, has_body: bool, image_bytes: bytes | None = None) -> None:
     """Attach a photo to the report and run face matching. B2: report_id is the
     report just created from this message's caption (if any); falls back to the
-    phone's active report key for photo-after-report. Sends its own reply."""
+    phone's active report key for photo-after-report. Sends its own reply.
+    image_bytes: when set (e.g. Telegram), the photo is embedded in memory and
+    media_url is a stable non-URL key ('telegram:<id>')."""
     _conv_state[phone].append({"role": "user", "content": "[envio una foto]"})
     if not media_url:
         if not has_body:
@@ -915,13 +943,13 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
                     json={"id": str(uuid.uuid4()), "report_id": rid, "storage_path": media_url},
                 )
         if rid:
-            match_id = await process_photo_for_report(rid, media_url, app)
+            match_id = await process_photo_for_report(rid, media_url, app, image_bytes=image_bytes)
             # Second face engine: reconexión's curated registry (/identificar). Creates
             # pending matches for human review; minor governance handled inside.
             rec_n = 0
             try:
                 import reconexion_face
-                rec_n = await reconexion_face.identify_and_store(rid, media_url, app)
+                rec_n = await reconexion_face.identify_and_store(rid, media_url, app, image_bytes=image_bytes)
             except Exception as exc:  # noqa: BLE001 - never break intake on this
                 logger.warning("reconexion identify (real-time) failed: %s", exc)
             if match_id:
@@ -1238,7 +1266,9 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
 
     # Photo: attach + run face search (sends its own face-result message).
     if has_media:
-        await _handle_photo(phone, media_url, report_id, app, bool(body))
+        # Telegram passes the photo bytes via the payload (no token-bearing URL).
+        await _handle_photo(phone, media_url, report_id, app, bool(body),
+                            image_bytes=payload.get("_image_bytes"))
         if not body:
             # The photo prompt asks for name/details; record it so a following
             # "no sé" skips name instead of re-asking.

@@ -186,34 +186,41 @@ async def embed_photo_from_url(
         logger.warning("embed_photo_from_url: download failed for %s: %s", photo_url, exc)
         return None
 
+    return await embed_photo_from_bytes(image_bytes, face_model)
+
+
+async def embed_photo_from_bytes(image_bytes: bytes, face_model: Any) -> dict | None:
+    """Decode image bytes, run InsightFace, return the best face (embedding/det_score/
+    bbox) or None. The bytes-in counterpart of embed_photo_from_url, used by channels
+    (e.g. Telegram) that download the photo themselves — keeps the image in memory so
+    no token-bearing URL is persisted and no face lands in a public bucket."""
+    if not image_bytes:
+        return None
     try:
         arr = np.frombuffer(image_bytes, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
-        logger.warning("embed_photo_from_url: decode error for %s: %s", photo_url, exc)
+        logger.warning("embed_photo_from_bytes: decode error: %s", exc)
         return None
 
     if img is None:
-        logger.warning("embed_photo_from_url: cv2 returned None for %s", photo_url)
+        logger.warning("embed_photo_from_bytes: cv2 returned None")
         return None
 
     # C5: asyncio.to_thread for blocking ML call
     try:
         faces = await asyncio.to_thread(face_model.get, img)
     except Exception as exc:
-        logger.warning("embed_photo_from_url: face_model.get raised %s for %s", exc, photo_url)
+        logger.warning("embed_photo_from_bytes: face_model.get raised %s", exc)
         return None
 
     if not faces:
-        logger.info("embed_photo_from_url: no face detected in %s", photo_url)
+        logger.info("embed_photo_from_bytes: no face detected")
         return None
 
     best = max(faces, key=lambda f: float(f.det_score))
-
     if best.embedding is None:
-        logger.warning(
-            "embed_photo_from_url: face detected but embedding is None for %s", photo_url
-        )
+        logger.warning("embed_photo_from_bytes: face detected but embedding is None")
         return None
 
     return {
@@ -227,6 +234,7 @@ async def process_photo_for_report(
     report_id: str,
     photo_url: str,
     app: Any,
+    image_bytes: bytes | None = None,
 ) -> str | None:
     """
     Extract a face embedding from photo_url and persist it in Supabase.
@@ -243,7 +251,13 @@ async def process_photo_for_report(
     sb_url: str = app.state.supabase_url.rstrip("/")
     sb_key: str = app.state.supabase_service_key
 
-    result = await embed_photo_from_url(photo_url, app.state.face_model)
+    # image_bytes provided (e.g. Telegram) -> embed in memory; else download the URL.
+    # photo_url is still used as the photos.storage_path key (for bytes channels it is
+    # a stable non-URL token like "telegram:<file_unique_id>").
+    if image_bytes is not None:
+        result = await embed_photo_from_bytes(image_bytes, app.state.face_model)
+    else:
+        result = await embed_photo_from_url(photo_url, app.state.face_model)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         photo_filter = {
