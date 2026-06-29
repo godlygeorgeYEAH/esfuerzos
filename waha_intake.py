@@ -268,7 +268,7 @@ def resolve_source_url(source: str, source_url: str | None) -> str | None:
         return f"https://docs.google.com/document/d/{doc_id}/edit" if doc_id else None
     # hospital_consolidado: every row is parsed from one source spreadsheet;
     # reuse the scraper's URL so an env override stays in sync.
-    if source == "hospital_consolidado":
+    if source in ("hospital_consolidado", "hospitales_26jun"):
         from scrapers.hospital_consolidado import _XLSX_URL
         return _XLSX_URL
     # source_url is "<scheme>:<id>" for several scrapers
