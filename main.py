@@ -342,6 +342,9 @@ async def admin_list_matches(
         # Skip cross-source duplicates of the same person (either side).
         if miss.get("dup") or found.get("dup"):
             continue
+        # Searched person already marked located -> drop all their candidates.
+        if miss.get("person_state") == "found":
+            continue
         found["is_hospital"] = found.get("source") in _HOSPITAL_SOURCES
         if mode in ("high", "hospital"):
             # The reunification that matters: buscado -> ENCONTRADO en hospital/refugio.
@@ -373,20 +376,37 @@ async def admin_match_review(
     decision: str,
     x_admin_key: str = Header(default=""),
 ):
-    """Human verifies a match: decision = 'confirmed' | 'rejected'. Confirmed
-    matches get picked up by the notifier and the family is alerted."""
+    """Human review of a match. decision:
+      - 'confirmed': valid match -> the notifier alerts both families.
+      - 'rejected':  false positive -> dropped, no notification.
+      - 'found':     the searched person was located -> flip their report to
+                     person_state='found' (so they stop showing as missing) and
+                     record the match as 'found'. The family is deliberately NOT
+                     notified — that is what 'confirmed' is for."""
     _check_admin(x_admin_key)
-    if decision not in ("confirmed", "rejected"):
-        raise HTTPException(status_code=400, detail="decision must be confirmed|rejected")
+    if decision not in ("confirmed", "rejected", "found"):
+        raise HTTPException(status_code=400, detail="decision must be confirmed|rejected|found")
     from datetime import datetime, timezone
     sb = settings.supabase_url.rstrip("/")
     k = settings.supabase_service_role_key
-    hdr = {"apikey": k, "Authorization": f"Bearer {k}", "Content-Type": "application/json",
-           "Prefer": "return=minimal"}
+    read_hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
+    write_hdr = {**read_hdr, "Content-Type": "application/json", "Prefer": "return=minimal"}
     payload = {"status": decision, "reviewer": "dashboard",
                "reviewed_at": datetime.now(timezone.utc).isoformat()}
     async with httpx.AsyncClient(timeout=15) as cl:
-        resp = await cl.patch(f"{sb}/rest/v1/matches", headers=hdr,
+        if decision == "found":
+            # Resolve the searched (missing) side from the match itself rather
+            # than trusting the client, then mark that person located.
+            mr = await cl.get(f"{sb}/rest/v1/matches", headers=read_hdr,
+                              params={"id": f"eq.{match_id}", "select": "missing_id", "limit": "1"})
+            rows = mr.json() if mr.status_code == 200 else []
+            missing_id = rows[0]["missing_id"] if rows else None
+            if not missing_id:
+                raise HTTPException(status_code=404, detail="match not found")
+            await cl.patch(f"{sb}/rest/v1/reports", headers=write_hdr,
+                           params={"id": f"eq.{missing_id}"},
+                           json={"person_state": "found"})
+        resp = await cl.patch(f"{sb}/rest/v1/matches", headers=write_hdr,
                               params={"id": f"eq.{match_id}"},
                               json=payload)
         ok = resp.status_code in (200, 204)
