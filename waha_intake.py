@@ -305,6 +305,20 @@ def _name_score(query: str, cand: str) -> float:
     return 0.6 * overlap + 0.4 * tsr
 
 
+def _same_person(a: str, b: str) -> bool:
+    """True if two names plausibly refer to the SAME person: one is a token-subset
+    of the other (a refinement like 'Maria Perez' → 'Maria Perez Gomez') or very
+    high similarity. False for 'Maria Perez' vs 'Carlos Perez' (shared surname,
+    different person) → triggers a new report (no overwrite)."""
+    ta = {t for t in _deaccent_shared(a).split() if len(t) >= 3}
+    tb = {t for t in _deaccent_shared(b).split() if len(t) >= 3}
+    if not ta or not tb:
+        return True  # can't tell → don't split
+    if ta <= tb or tb <= ta:
+        return True
+    return _name_score(a, b) >= 0.85
+
+
 def _rank_candidates(query_name: str, query_age, rows: list, query_location: str | None = None) -> list:
     """Drop candidates whose name doesn't really match, then rank survivors by
     name (dominant) + age proximity + location agreement (canonicalized, so
@@ -340,6 +354,29 @@ def _is_duplicate(msg_id: str) -> bool:
         return True
     _seen_msg_ids[msg_id] = now
     return False
+
+# Outbound safety guard (audit blocker): the LLM reply is free text. A jailbreak
+# or hallucination must NEVER tell a family someone died or assert a confirmed
+# match. This deterministic filter runs on every LLM-derived reply before send.
+_DEATH_TOKENS = ("fallec", "muert", "occiso", "difunt", "deceased", "deces")
+_UNHEDGED_CONFIRM = ("encontram", "localizam", "es el mismo", "es la misma",
+                     "es tu familiar", "lo encontr", "la encontr", "dado de baja")
+_SAFE_HEDGE = ("Gracias por la información, la registré. Cualquier coincidencia es "
+               "preliminar y la verifica el equipo Reúne VE antes de confirmarte nada.")
+
+
+def _sanitize_reply(text: str) -> str:
+    """Replace any LLM reply that states death or an unhedged confirmation with a
+    safe hedge. Conservative: false hope / false grief is the worst-case harm."""
+    if not text:
+        return text
+    d = _deaccent_shared(text)
+    if any(t in d for t in _DEATH_TOKENS):
+        return _SAFE_HEDGE
+    if "posible" not in d and any(t in d for t in _UNHEDGED_CONFIRM):
+        return _SAFE_HEDGE
+    return text
+
 
 # Groq / LLM client config
 _LLM_URL = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
@@ -455,10 +492,13 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
 
     # Merge new non-null fields into the running state; downstream sees the union
     ext = result.get("extracted") or {}
-    # New-person detection: if the user names a clearly different person, start fresh
+    # New-person detection: start fresh unless the new name is the SAME person.
+    # Same = one name's tokens are a subset of the other (a refinement) or very
+    # high similarity. This catches 'Maria Perez' → 'Carlos Perez' (shared
+    # surname, different person) which a plain score threshold missed.
     new_name = (ext.get("name") or "").strip()
     cur_name = (_collected[phone].get("name") or "").strip()
-    if new_name and cur_name and _name_score(new_name, cur_name) < 0.4:
+    if new_name and cur_name and not _same_person(new_name, cur_name):
         _collected[phone].clear()
         _searched_shown.discard(phone)
         _report_keys.pop(phone, None)  # new person → new report key (P0-b)
@@ -767,7 +807,7 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
     reply = ""
     if body:
         result = await _llm_extract(phone, body)
-        reply = result.get("reply", "")
+        reply = _sanitize_reply(result.get("reply", ""))  # outbound safety guard
         extracted = result.get("extracted", {})
         if reply:
             _conv_state[phone].append({"role": "assistant", "content": reply})

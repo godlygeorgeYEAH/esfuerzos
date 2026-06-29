@@ -156,6 +156,27 @@ async def scen_injection(phone):
     return replies, None
 
 
+def scen_guards():
+    """Deterministic guards (no network): outbound death/confirmation sanitizer
+    and same-person detection (no multi-relative overwrite)."""
+    from text_normalize import deaccent
+    ente = "guards"
+    s1 = deaccent(W._sanitize_reply("Lamentablemente tu hijo falleció"))
+    s2 = deaccent(W._sanitize_reply("Encontramos a tu hijo en el hospital"))
+    s3 = deaccent(W._sanitize_reply("Hay una posible coincidencia en verificación"))
+    death_blocked = ("fallec" not in s1) and ("encontram" not in s2)
+    _record(ente, "bloquea muerte/confirmación falsa", "death+unhedged→hedge",
+            "blocked" if death_blocked else "LEAK", death_blocked)
+    _record(ente, "no rompe replies legítimos", "'posible' se mantiene",
+            "kept" if "posible" in s3 else "broke", "posible" in s3)
+    diff = (not W._same_person("Maria Perez", "Carlos Perez")) and (not W._same_person("Maria Perez", "Maria Gomez"))
+    _record(ente, "hermanos NO se sobrescriben", "Carlos/Maria Perez = distintos",
+            "ok" if diff else "OVERWRITE", diff)
+    same = W._same_person("Maria Perez", "Maria Perez Gomez")
+    _record(ente, "refinamiento = mismo report", "Maria Perez+Gomez = mismo",
+            "ok" if same else "split", same)
+
+
 async def scen_photo(phone):
     ente = "foto (familiar con foto)"
     # Build face model once
@@ -214,6 +235,7 @@ async def main():
         await scen_false_positive("e2e_fp1")
         await scen_injection("e2e_inj1")
         await scen_photo("e2e_photo1")
+        scen_guards()
     finally:
         await _cleanup()
 
