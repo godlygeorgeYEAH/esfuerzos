@@ -172,13 +172,14 @@ def parse_workbook(data: bytes) -> list[dict]:
             # matching/notification handle it with care and the reviewer sees it
             # before confirming. Family closure ("vivo o muerto") needs this, but a
             # death must never be delivered as "encontrado sano".
+            # person_state enum (live): unknown | alive | injured | deceased.
             obs_d = _deaccent(obs)
             if any(t in obs_d for t in ("fallec", "muert", "occiso", "difunt")):
                 person_state = "deceased"
-            elif any(t in obs_d for t in ("alta", "egres")):
-                person_state = "discharged"
+            elif any(t in obs_d for t in ("herid", "lesion", "grave", "critic", "uci", "intervenido")):
+                person_state = "injured"
             else:
-                person_state = "found"
+                person_state = "alive"  # listed in a hospital/shelter = located alive
             # Stable per-row key, ALWAYS namespaced by tab so the same person
             # listed in two hospitals yields two rows (different location), while
             # an exact in-tab repeat collapses. Prefer cédula, else name slug.
