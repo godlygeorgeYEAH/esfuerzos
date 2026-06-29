@@ -14,3 +14,4 @@ sentence-transformers==3.0.1
 rapidfuzz==3.9.7
 aiohttp==3.9.5
 beautifulsoup4==4.12.3
+openpyxl==3.1.5

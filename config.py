@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_model: str = "llama-3.3-70b-versatile"
+    # Fallback provider chain (tried in order after the primary Groq above).
+    # JSON list in env LLM_FALLBACKS, each item OpenAI-compatible:
+    #   [{"name":"openrouter-llama","base_url":"https://openrouter.ai/api/v1",
+    #     "api_key":"sk-or-...","model":"meta-llama/llama-3.3-70b-instruct:free",
+    #     "headers":{"HTTP-Referer":"https://reune.ve","X-Title":"Reune VE"}}]
+    llm_fallbacks: list[dict] = []
 
     class Config:
         env_file = ".env"

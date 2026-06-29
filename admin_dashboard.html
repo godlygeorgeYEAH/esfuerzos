@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reúne VE · Revisión humana</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, "Segoe UI", Roboto, sans-serif; margin: 0; background: #0f1216; color: #e7edf3; }
+  header { position: sticky; top: 0; z-index: 5; background: #161b22; padding: 12px 16px;
+           border-bottom: 1px solid #2a313a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  .muted { color: #8b97a6; font-size: 13px; }
+  input, button { font: inherit; }
+  input { background: #0f1216; border: 1px solid #2a313a; color: #e7edf3; padding: 6px 8px; border-radius: 6px; }
+  button { cursor: pointer; border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
+  .btn { background: #243140; color: #cfe1f2; }
+  #list { padding: 16px; display: flex; flex-direction: column; gap: 14px; max-width: 1100px; margin: 0 auto; }
+  .card { background: #161b22; border: 1px solid #2a313a; border-radius: 10px; overflow: hidden; }
+  .scores { display: flex; gap: 8px; padding: 8px 14px; background: #11161c; font-size: 13px;
+            border-bottom: 1px solid #2a313a; flex-wrap: wrap; align-items: center; }
+  .badge { padding: 2px 9px; border-radius: 20px; font-size: 12px; font-weight: 700; }
+  .b-face { background: #173a2a; color: #5be39b; } .b-text { background: #1d2f45; color: #7db4ff; }
+  .b-comb { background: #3a3417; color: #e3cf5b; } .b-hosp { background: #3a1717; color: #ff8d8d; }
+  .b-dead { background: #3a3a3a; color: #d7d7d7; } .marks { font-size: 12px; color: #9fb0c0; margin-top: 6px; font-style: italic; }
+  .dead-note { background: #2a1414; border: 1px solid #5a2a2a; color: #ffb3b3; padding: 6px 10px; border-radius: 6px; font-size: 12px; margin-top: 8px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; }
+  .side { padding: 14px; border-right: 1px solid #2a313a; }
+  .side:last-child { border-right: 0; }
+  .side h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: #8b97a6;
+             display: flex; align-items: center; gap: 8px; }
+  .name { font-size: 18px; font-weight: 700; margin: 2px 0; }
+  .field { font-size: 13px; color: #c2cdd9; margin: 3px 0; }
+  .photo { width: 100%; max-height: 260px; object-fit: contain; background: #0b0e12; border-radius: 6px; margin-top: 8px; }
+  a { color: #7db4ff; word-break: break-all; }
+  .actions { display: flex; gap: 10px; padding: 12px 14px; background: #11161c; }
+  .ok { background: #1f7a44; color: #fff; flex: 1; } .no { background: #7a2b2b; color: #fff; flex: 1; }
+  .empty { text-align: center; color: #8b97a6; padding: 48px 16px; }
+  @media (max-width: 680px) { .pair { grid-template-columns: 1fr; } .side { border-right: 0; border-bottom: 1px solid #2a313a; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reúne VE · Revisión humana</h1>
+  <span id="count" class="muted"></span>
+  <span style="flex:1"></span>
+  <input id="key" type="password" placeholder="ADMIN_KEY" size="22">
+  <button class="btn" id="save">Guardar clave</button>
+  <button class="btn" id="reload">Recargar</button>
+</header>
+<div id="list"><div class="empty">Ingresa tu ADMIN_KEY y pulsa Recargar.</div></div>
+<script>
+const $ = s => document.querySelector(s);
+const list = $('#list');
+// Sources that mean the person was physically located in a hospital or shelter.
+const HOSP = new Set(['pacientes_terremoto','google_drive_hospital','hospitales_ve','hospital_consolidado']);
+const getKey = () => localStorage.getItem('ak') || '';
+const pct = x => Math.round((x || 0) * 100);
+const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+if (getKey()) $('#key').value = getKey();
+$('#save').onclick = () => { localStorage.setItem('ak', $('#key').value.trim()); load(); };
+$('#reload').onclick = load;
+
+function side(p, role) {
+  if (!p) return `<div class="side"><h3>${role}</h3><div class="muted">sin datos</div></div>`;
+  const hosp = HOSP.has(p.source);
+  const dead = p.person_state === 'deceased';
+  const age = p.age ? `, ${esc(p.age)} años` : '';
+  const loc = esc(p.last_seen_location || 'ubicación por confirmar');
+  const src = p.source_url
+    ? `<a href="${esc(p.source_url)}" target="_blank" rel="noopener">${esc(p.source)}</a>`
+    : esc(p.source);
+  let badge = hosp ? '<span class="badge b-hosp">🏥 EN HOSPITAL/REFUGIO</span>' : '';
+  if (dead) badge += ' <span class="badge b-dead">✝ FALLECIDO/A</span>';
+  const img = `<img class="photo" loading="lazy" src="/admin/photo/${encodeURIComponent(p.id)}?k=${encodeURIComponent(getKey())}" onerror="this.remove()">`;
+  const marks = p.distinguishing_marks ? `<div class="marks">${esc(p.distinguishing_marks)}</div>` : '';
+  const deadNote = dead ? '<div class="dead-note">⚠ Registro marcado como fallecido en la fuente. Verifica con extremo cuidado; la notificación a la familia debe ser sensible.</div>' : '';
+  return `<div class="side"><h3>${role} ${badge}</h3>`
+    + `<div class="name">${esc(p.full_name || '(sin nombre)')}${age}</div>`
+    + `<div class="field">📍 ${loc}</div>`
+    + `<div class="field">Fuente: ${src}</div>${marks}${deadNote}${img}</div>`;
+}
+
+function card(m) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.dataset.id = m.id;
+  const scores = '<div class="scores">'
+    + (m.face_score > 0 ? `<span class="badge b-face">cara ${pct(m.face_score)}%</span>` : '')
+    + (m.text_score > 0 ? `<span class="badge b-text">texto ${pct(m.text_score)}%</span>` : '')
+    + `<span class="badge b-comb">combinado ${pct(m.combined_score)}%</span>`
+    + `<span class="muted">${esc((m.created_at || '').slice(0, 16).replace('T', ' '))}</span></div>`;
+  const pair = `<div class="pair">${side(m.missing, 'Buscado')}${side(m.found, 'Encontrado')}</div>`;
+  const actions = '<div class="actions">'
+    + '<button class="ok" data-act="confirmed">✓ Aprobar (notificar familia)</button>'
+    + '<button class="no" data-act="rejected">✕ Rechazar</button></div>';
+  el.innerHTML = scores + pair + actions;
+  return el;
+}
+
+async function load() {
+  const k = getKey();
+  if (!k) { list.innerHTML = '<div class="empty">Falta ADMIN_KEY.</div>'; return; }
+  list.innerHTML = '<div class="empty">Cargando…</div>';
+  try {
+    const r = await fetch('/admin/matches?status=pending&limit=100', { headers: { 'X-Admin-Key': k } });
+    if (!r.ok) { list.innerHTML = `<div class="empty">Error ${r.status} (¿clave correcta?)</div>`; return; }
+    const d = await r.json();
+    const ms = d.matches || [];
+    $('#count').textContent = ms.length + ' pendientes';
+    if (!ms.length) { list.innerHTML = '<div class="empty">✓ No hay coincidencias pendientes.</div>'; return; }
+    list.innerHTML = '';
+    ms.forEach(m => list.appendChild(card(m)));
+  } catch (e) { list.innerHTML = '<div class="empty">Error de red.</div>'; }
+}
+
+list.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const cardEl = btn.closest('.card');
+  const id = cardEl.dataset.id;
+  const decision = btn.dataset.act;
+  if (decision === 'confirmed' && !confirm('¿Confirmar esta coincidencia? Se notificará a la familia.')) return;
+  cardEl.style.opacity = .4;
+  try {
+    const r = await fetch(`/admin/match-review?match_id=${encodeURIComponent(id)}&decision=${decision}`,
+      { method: 'POST', headers: { 'X-Admin-Key': getKey() } });
+    const d = await r.json();
+    if (d.ok) {
+      cardEl.remove();
+      const left = list.querySelectorAll('.card').length;
+      $('#count').textContent = left + ' pendientes';
+      if (!left) list.innerHTML = '<div class="empty">✓ No hay coincidencias pendientes.</div>';
+    } else { cardEl.style.opacity = 1; alert('No se pudo: ' + JSON.stringify(d)); }
+  } catch (e) { cardEl.style.opacity = 1; alert('Error de red'); }
+});
+
+if (getKey()) load();
+</script>
+</body>
+</html>

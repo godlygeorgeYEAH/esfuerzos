@@ -21,6 +21,7 @@ from scrapers.localizados_venezuela import LocalizadosVenezuelaScraper
 from scrapers.venezuela_te_busca import VenezuelaTeBuscaScraper
 from scrapers.sos_laguaira import SosLaGuairaScraper
 from scrapers.pacientes_terremoto import PacientesTerremotoVZLAScraper
+from scrapers.hospital_consolidado import HospitalConsolidadoScraper
 from scrapers.tuayudave import TuAyudaVEScraper
 
 logger = logging.getLogger("orchestrator")
@@ -45,6 +46,7 @@ def _make_scrapers() -> dict:
         "sos_laguaira": SosLaGuairaScraper(sb_url, sb_key),
         "pacientes_terremoto": PacientesTerremotoVZLAScraper(),
         "tuayudave": TuAyudaVEScraper(sb_url, sb_key),
+        "hospital_consolidado": HospitalConsolidadoScraper(),
     }
 
     # Optional scrapers (require API keys)

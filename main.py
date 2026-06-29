@@ -24,6 +24,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, Response
 from insightface.app import FaceAnalysis
 from sentence_transformers import SentenceTransformer
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -293,7 +294,8 @@ async def admin_list_matches(
         reps = {}
         if ids:
             rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
-                "select": "id,full_name,age,last_seen_location,source,source_url,kind",
+                "select": "id,full_name,age,last_seen_location,source,source_url,kind,"
+                          "distinguishing_marks,person_state",
                 "id": f"in.({','.join(ids)})"})
             reps = {x["id"]: x for x in (rr.json() if rr.status_code == 200 else [])}
         for m in matches:
@@ -313,16 +315,97 @@ async def admin_match_review(
     _check_admin(x_admin_key)
     if decision not in ("confirmed", "rejected"):
         raise HTTPException(status_code=400, detail="decision must be confirmed|rejected")
+    from datetime import datetime, timezone
     sb = settings.supabase_url.rstrip("/")
     k = settings.supabase_service_role_key
     hdr = {"apikey": k, "Authorization": f"Bearer {k}", "Content-Type": "application/json",
            "Prefer": "return=minimal"}
+    payload = {"status": decision, "reviewer": "dashboard",
+               "reviewed_at": datetime.now(timezone.utc).isoformat()}
     async with httpx.AsyncClient(timeout=15) as cl:
         resp = await cl.patch(f"{sb}/rest/v1/matches", headers=hdr,
                               params={"id": f"eq.{match_id}"},
-                              json={"status": decision})
+                              json=payload)
         ok = resp.status_code in (200, 204)
     return {"ok": ok, "match_id": match_id, "status": decision}
+
+
+# Approval dashboard (human review UI). Served from FastAPI behind the firewall;
+# reach it over an SSH tunnel: ssh -L 8080:localhost:8080 root@<vps> then open
+# http://localhost:8080/admin/dashboard. The HTML shell carries no data — every
+# data call from the page is gated by the ADMIN_KEY the reviewer enters.
+_DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "admin_dashboard.html")
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard():
+    try:
+        with open(_DASHBOARD_PATH, encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="dashboard asset missing")
+
+
+# Hospital/shelter sources whose 'found' reports mean the person was physically
+# located. Used to emphasize real matches in the dashboard (kept in sync with
+# the HOSP set in admin_dashboard.html).
+_PHOTO_KEYS = ("foto_url", "photoUrl", "photo_url", "foto", "image_url", "imageUrl")
+_PHOTO_BASE = {"venezuela_te_busca": "https://venezuelatebusca.com"}
+
+
+def _resolve_photo_url(report: dict) -> str | None:
+    """Best displayable image URL for a report: original source photo from
+    raw_data first (resolving relative paths), else a stored photo URL."""
+    raw = report.get("raw_data") or {}
+    source = report.get("source") or ""
+    if isinstance(raw, dict):
+        for key in _PHOTO_KEYS:
+            v = raw.get(key)
+            if isinstance(v, str) and v.strip():
+                v = v.strip()
+                if v.startswith("http"):
+                    return v
+                if v.startswith("/") and source in _PHOTO_BASE:
+                    return _PHOTO_BASE[source] + v
+    return None
+
+
+@app.get("/admin/photo/{report_id}")
+async def admin_photo(report_id: str, k: str = "", x_admin_key: str = Header(default="")):
+    """Admin-gated image proxy: streams a report's photo so faces can be reviewed
+    without re-exposing a public photo mount. Auth via header or ?k= (the latter
+    lets <img src> work; access is SSH-tunnel-only behind the firewall)."""
+    _check_admin(x_admin_key or k)
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+        rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
+            "id": f"eq.{report_id}", "select": "source,raw_data", "limit": "1"})
+        rows = rr.json() if rr.status_code == 200 else []
+        url = _resolve_photo_url(rows[0]) if rows else None
+        if not url:
+            # Fall back to a stored photo URL (storage_path is a full URL).
+            pr = await cl.get(f"{sb}/rest/v1/photos", headers=hdr, params={
+                "report_id": f"eq.{report_id}", "select": "storage_path", "limit": "1"})
+            prows = pr.json() if pr.status_code == 200 else []
+            sp = (prows[0].get("storage_path") if prows else None) or ""
+            url = sp if sp.startswith("http") else None
+        if not url:
+            raise HTTPException(status_code=404, detail="no photo")
+        try:
+            img = await cl.get(url, headers={"User-Agent": "Mozilla/5.0 (ReuneVE-admin)"})
+            if img.status_code != 200 or not img.content:
+                raise HTTPException(status_code=404, detail="photo fetch failed")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=404, detail="photo unreachable")
+    ctype = img.headers.get("content-type", "image/jpeg")
+    if not ctype.startswith("image/"):
+        ctype = "image/jpeg"
+    return Response(content=img.content, media_type=ctype,
+                    headers={"Cache-Control": "private, max-age=300"})
 
 
 if __name__ == "__main__":
