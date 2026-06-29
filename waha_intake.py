@@ -99,6 +99,18 @@ _SKIP_WORDS = {"no", "no se", "no lo se", "nose", "ninguno", "ninguna", "no teng
 _HOSP_SOURCES = {"hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
                  "google_drive_hospital", "hospitales_ve"}
 
+# Greeting / restart: a returning user must start a CLEAN form, not resume a stale
+# one. A bare greeting or a "nuevo" intent resets the form and welcomes.
+_GREETING = {"hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
+             "hi", "hey", "ola", "menu", "inicio", "empezar", "comenzar", "start", "ayuda"}
+_RESTART = {"nuevo", "registro nuevo", "nuevo registro", "otra persona", "otro",
+            "reiniciar", "reset", "nueva busqueda", "nueva busqueda", "empezar de nuevo",
+            "registrar", "buscar otra", "buscar a otra"}
+_WELCOME = (
+    "👋 Hola, soy el asistente de *Reúne VE*. Te ayudo a saber si una persona ya fue "
+    "localizada en un hospital o refugio, o a registrar tu búsqueda.\n\n"
+    "¿Cuál es el *nombre completo* de la persona? Si no lo sabes, escribe *no sé*.")
+
 # Deduplication: msg_id -> timestamp. Clears entries older than 60s.
 _seen_msg_ids: dict[str, float] = {}
 _DEDUP_TTL = 60.0
@@ -827,6 +839,16 @@ async def _handle_message(payload: dict, app: Any) -> None:
             _evict_memory(phone)
 
 
+def _reset_form(phone: str) -> None:
+    """Clear all per-phone intake state so the next message starts a fresh form."""
+    _conv_state.pop(phone, None)
+    _collected.pop(phone, None)
+    _report_keys.pop(phone, None)
+    _searched_shown.discard(phone)
+    _skipped.pop(phone, None)
+    _asked.pop(phone, None)
+
+
 def _field_ok(phone: str, st: dict, field: str, kind: str, has_media: bool) -> bool:
     """A form field is satisfied if collected, explicitly skipped, or covered by
     context (a photo covers 'description'; 'name' for an unidentified found person)."""
@@ -921,6 +943,16 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
 
     logger.info("WAHA message from %s: has_media=%s media_url=%s body_len=%d",
                 _hp(phone), has_media, media_url or "None", len(body))
+
+    # Greeting / restart: a bare "Hola" or "nuevo" resets the form and welcomes,
+    # so a returning user starts a CLEAN intake instead of resuming a stale one.
+    body_norm = _deaccent_shared(body).strip()
+    if body and not has_media and (body_norm in _GREETING or body_norm in _RESTART):
+        _reset_form(phone)
+        _asked[phone] = "name"
+        _conv_state[phone].append({"role": "assistant", "content": _WELCOME})
+        await _waha_send(phone, _WELCOME)
+        return
 
     # Track message in conversation history
     if body:
