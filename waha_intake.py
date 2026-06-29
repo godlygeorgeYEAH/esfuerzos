@@ -238,10 +238,11 @@ def _report_key(phone: str) -> str:
 def _format_match_line(m: dict) -> str:
     """Format one candidate: name, age, location [Source] + URL if resolvable."""
     name = m.get("full_name") or "Desconocido"
-    age = m.get("age") or "?"
+    age = m.get("age")
     loc = m.get("last_seen_location") or "ubicación por confirmar"
     label = _source_label(m.get("source", ""))
-    line = f"• {name}, {age} años — {loc} [{label}]"
+    age_part = f", {age} años" if age else ""
+    line = f"• {name}{age_part} — {loc} [{label}]"
     url = _resolve_source_url(m.get("source", ""), m.get("source_url"))
     if url:
         line += f"\n  {url}"
@@ -412,6 +413,46 @@ _LLM_HEADERS = {
     "Content-Type": "application/json",
 }
 
+# Groq free tier binds on tokens/min (~12k). Bursts (fast typing, concurrency,
+# tests) hit 429. Retry with the server-advertised reset, cap the wait so the
+# webhook stays responsive, and only send recent history to shrink each call.
+_LLM_MAX_ATTEMPTS = 3
+_LLM_RETRY_CAP = 4.0      # seconds; never leave a WhatsApp user hanging longer
+_HISTORY_MAX = 8          # messages of context sent to the LLM (token budget)
+
+
+def _parse_groq_duration(s: str) -> float:
+    """Parse Groq rate-limit reset strings ('235ms', '2.5s', '1m26.4s') to seconds."""
+    s = (s or "").strip().lower()
+    if not s:
+        return 0.0
+    if s.endswith("ms"):
+        try:
+            return float(s[:-2]) / 1000.0
+        except ValueError:
+            return 0.0
+    total = 0.0
+    m = re.search(r"([\d.]+)m(?!s)", s)
+    if m:
+        total += float(m.group(1)) * 60
+    sec = re.search(r"([\d.]+)s", s)
+    if sec:
+        total += float(sec.group(1))
+    return total
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float:
+    """How long to wait before retrying a 429, from headers, capped."""
+    ra = resp.headers.get("retry-after")
+    if ra:
+        try:
+            return min(float(ra), _LLM_RETRY_CAP)
+        except ValueError:
+            pass
+    reset = (resp.headers.get("x-ratelimit-reset-tokens")
+             or resp.headers.get("x-ratelimit-reset-requests") or "")
+    return min(_parse_groq_duration(reset) or 2.0, _LLM_RETRY_CAP)
+
 _SYSTEM_PROMPT = """Eres el asistente de Reune VE, un sistema para reunir familias venezolanas separadas durante emergencias.
 
 Tu rol: recolectar información estructurada sobre personas desaparecidas o encontradas.
@@ -487,35 +528,51 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
     """Call Groq to extract report data and generate reply. Injects the running
     accumulated state so the LLM never re-asks known fields, and merges the new
     extraction into that state so downstream always sees the full report."""
-    history = list(_conv_state[phone])
+    history = list(_conv_state[phone])[-_HISTORY_MAX:]  # cap tokens/min usage
     state = _collected[phone]
     system = _SYSTEM_PROMPT + "\n\n" + _format_state(state)
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": new_message})
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as cl:
-            resp = await cl.post(
-                _LLM_URL,
-                headers=_LLM_HEADERS,
-                json={
-                    "model": settings.llm_model,
-                    "messages": messages,
-                    "temperature": 0.3,
-                    "max_tokens": 400,
-                    "response_format": {"type": "json_object"},
-                },
-            )
+    payload = {
+        "model": settings.llm_model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+    }
+    result = None
+    rate_limited = False
+    for attempt in range(_LLM_MAX_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=15) as cl:
+                resp = await cl.post(_LLM_URL, headers=_LLM_HEADERS, json=payload)
+            if resp.status_code == 429:
+                rate_limited = True
+                wait = _retry_after_seconds(resp)
+                logger.warning("Groq 429 for %s (attempt %d/%d), waiting %.2fs",
+                               _hp(phone), attempt + 1, _LLM_MAX_ATTEMPTS, wait)
+                if attempt + 1 < _LLM_MAX_ATTEMPTS:
+                    await asyncio.sleep(wait)
+                    continue
+                break
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             result = json.loads(content)
-    except Exception as exc:
-        logger.error("LLM call failed for phone %s: %s", _hp(phone), exc)
-        return {
-            "reply": "Hubo un problema procesando tu mensaje. Intenta de nuevo en un momento.",
-            "extracted": {"report_ready": False},
-        }
+            rate_limited = False
+            break
+        except Exception as exc:
+            logger.error("LLM call failed for phone %s: %s", _hp(phone), exc)
+            break  # non-429 error: don't retry
+    if result is None:
+        # Data is not lost: the running report state (_collected) and the
+        # conversation history persist, so resending in a minute continues the
+        # same intake. Tell the user how to recover instead of a dead-end error.
+        reply = ("Estamos recibiendo muchos mensajes en este momento. Tu información no se "
+                 "perdió, reenvíala en un minuto y seguimos." if rate_limited
+                 else "Hubo un problema procesando tu mensaje. Intenta de nuevo en un momento.")
+        return {"reply": reply, "extracted": {"report_ready": False}}
 
     # Merge new non-null fields into the running state; downstream sees the union
     ext = result.get("extracted") or {}
