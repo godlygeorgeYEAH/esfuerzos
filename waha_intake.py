@@ -344,6 +344,8 @@ except ImportError:  # pragma: no cover
 # token-sort ratio: this rejects 'Ramirez Arantza' for 'Arantza Bastidas Dias'
 # while keeping partial DB records like 'Arantza Bastidas'.
 _NAME_FLOOR = 0.60
+# Max age difference (years) before a candidate is rejected when BOTH ages are known.
+_AGE_GATE = 15
 
 
 def _name_score(query: str, cand: str) -> float:
@@ -364,7 +366,10 @@ def _name_score(query: str, cand: str) -> float:
         phon_hit = phonetic_token(t) in cand_phon          # homophone channel
         if fuzzy_hit or phon_hit or t in ct:
             matched += 1
-    overlap = matched / min(len(qt), len(ct))      # fraction of smaller name matched
+    # Denominator = the LONGER name: a 2-token candidate must still cover most of a
+    # 5-token query. (min() rewarded short partials — 'Vanesa Gonzalez' scored 1.0
+    # against 'Karina Vanesa Vannessa Leon Gonzales', a false hospital match.)
+    overlap = matched / max(len(qt), len(ct))
     tsr = (_fuzz.token_sort_ratio(q, c) / 100.0) if _HAS_FUZZ else overlap
     return 0.6 * overlap + 0.4 * tsr
 
@@ -400,6 +405,16 @@ def _rank_candidates(query_name: str, query_age, rows: list, query_location: str
         ns = _name_score(query_name, cand_name)
         if ns < _NAME_FLOOR:
             continue
+        # Age hard-gate (like a human reviewer): when BOTH ages are known, reject a
+        # clearly different age — a 6-year-old is never a 39-year-old. Records with
+        # unknown age are kept (most hospital rows lack age; rely on name/cédula).
+        try:
+            c_age = int(str(m.get("age")).strip()) if m.get("age") not in (None, "") else None
+        except (ValueError, TypeError):
+            c_age = None
+        if q_age is not None and c_age is not None:
+            if abs(q_age - c_age) > _AGE_GATE or (min(q_age, c_age) < 13 <= max(q_age, c_age) and abs(q_age - c_age) > 6):
+                continue
         ag = age_match_score(q_age, m.get("age"))                       # 0..1, 0.5 if unknown
         loc = location_score(query_location, m.get("last_seen_location"))  # 0..1, 0.5 if unknown
         score = 0.7 * ns + 0.15 * ag + 0.15 * loc
@@ -901,6 +916,38 @@ def _next_field(phone: str, st: dict, kind: str, has_media: bool) -> str | None:
     return None
 
 
+async def _search_by_cedula(cedula: str, exclude_id: str | None = None) -> list:
+    """Exact national-ID search — the highest-precision signal. Finds records whose
+    distinguishing_marks carry the same cédula (hospital/shelter rows store it as
+    'CI: <digits>'). Hospital/refugio hits are surfaced first."""
+    digits = re.sub(r"\D", "", cedula or "")
+    if not (5 <= len(digits) <= 10):
+        return []
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.get(
+                f"{sb}/rest/v1/reports",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                params={
+                    "select": "id,full_name,age,last_seen_location,source,source_url,kind,distinguishing_marks",
+                    "distinguishing_marks": f"ilike.*{digits}*",
+                    "source": "neq.waha_whatsapp",
+                    "limit": "10",
+                })
+            rows = r.json() if r.status_code == 200 else []
+    except Exception as exc:
+        logger.warning("cedula search failed: %s", exc)
+        return []
+    # Verify the cédula appears as a standalone number (not a substring of a phone).
+    pat = re.compile(r"(?<!\d)" + re.escape(digits) + r"(?!\d)")
+    hits = [row for row in rows if row.get("id") != exclude_id
+            and pat.search(row.get("distinguishing_marks") or "")]
+    hits.sort(key=lambda m: 0 if m.get("source") in _HOSP_SOURCES else 1)
+    return hits
+
+
 async def _search_hospital_matches(name: str, exclude_id: str | None = None) -> list:
     """Targeted recall against hospital/shelter sources ONLY, so a real
     'ya localizado' record is never buried under high-volume aggregator results
@@ -937,32 +984,57 @@ async def _search_hospital_matches(name: str, exclude_id: str | None = None) -> 
     return results
 
 
-async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_id) -> None:
-    """Clear, hospital-first result. Hospital/refugio matches come FIRST ('ya
-    localizado'); 'se busca' sources are secondary/optional. Never invents a match —
-    every line comes from a real DB candidate."""
-    hosp_lines: list[str] = []
-    other_lines: list[str] = []
+async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_id,
+                             cedula: str | None = None) -> None:
+    """Clear result, ordered like a human reviewer would rank confidence:
+       1) EXACT cédula (same document) — strongest,
+       2) name match in a hospital/refugio (with age gate + strict name),
+       3) other 'se busca' sources (secondary).
+    Never invents a match — every line is a real DB candidate."""
+    # LOCALIZED = strong "ya está en un hospital/refugio" evidence. REFERENCE = other
+    # search listings (incl. same-cédula in a 'se busca' source = another searcher).
+    # Deduped by record (source_url) so the same listing never shows twice.
+    localized: dict[str, str] = {}
+    reference: dict[str, str] = {}
+    cedula_in_hospital = False
+
+    def _add(bucket: dict, m: dict, mark: str = "") -> None:
+        key = m.get("source_url") or m.get("id") or _format_match_line(m)
+        bucket.setdefault(key, mark + _format_match_line(m))
+
+    if cedula:
+        for m in await _search_by_cedula(cedula, exclude_id=report_id):
+            if m.get("source") in _HOSP_SOURCES or m.get("kind") == "found":
+                _add(localized, m, "🪪 ")
+                cedula_in_hospital = True
+            else:
+                _add(reference, m, "🪪 ")
     if name:
-        # 1) dedicated hospital/refugio recall (the priority answer)
         hosp_cands = await _search_hospital_matches(name, exclude_id=report_id)
-        hosp_ranked = _dedup_candidates(_rank_candidates(name, age, hosp_cands, loc), limit=3)
-        hosp_lines = [_format_match_line(m) for m in hosp_ranked]
-        # 2) other ('se busca') sources, secondary
+        for m in _dedup_candidates(_rank_candidates(name, age, hosp_cands, loc), limit=3):
+            _add(localized, m)
         gen = await _search_existing_matches(name, kind, exclude_id=report_id)
         gen = [c for c in gen if c.get("source") not in _HOSP_SOURCES]
-        other_ranked = _dedup_candidates(_rank_candidates(name, age, gen, loc), limit=3)
-        other_lines = [_format_match_line(m) for m in other_ranked]
+        for m in _dedup_candidates(_rank_candidates(name, age, gen, loc), limit=3):
+            _add(reference, m)
+    # Don't repeat a record in reference if it's already shown as localized.
+    for k in list(reference):
+        if k in localized:
+            reference.pop(k, None)
+    localized_lines = list(localized.values())[:4]
+    reference_lines = list(reference.values())[:3]
     parts: list[str] = []
-    if hosp_lines:
-        parts.append("✅ Puede que ya esté localizada. Posible coincidencia en hospital/refugio:\n"
-                     + "\n".join(hosp_lines)
+    if localized_lines:
+        head = ("✅ *Coincidencia por cédula en hospital/refugio* — muy probable que sea la persona:"
+                if cedula_in_hospital
+                else "Posible coincidencia en hospital/refugio (en verificación):")
+        parts.append(head + "\n" + "\n".join(localized_lines)
                      + "\nEl equipo Reúne VE lo verifica antes de confirmar.")
     else:
         parts.append("Por ahora *no aparece* en hospitales ni refugios de nuestra base.")
-    if other_lines:
-        parts.append("También hay reportes en otras búsquedas (sin confirmar):\n"
-                     + "\n".join(other_lines))
+    if reference_lines:
+        parts.append("Otros reportes con datos parecidos (sin confirmar, solo referencia):\n"
+                     + "\n".join(reference_lines))
     parts.append("Registré tu reporte y tu contacto. Te aviso apenas aparezca en un hospital o refugio.")
     await _waha_send(phone, "\n\n".join(parts))
 
@@ -1057,7 +1129,8 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
     # Form complete → search ONCE and answer clearly (hospital/refugio first).
     if phone not in _searched_shown:
         _searched_shown.add(phone)
-        await _search_and_answer(phone, name, kind, st.get("age"), loc, report_id)
+        await _search_and_answer(phone, name, kind, st.get("age"), loc, report_id,
+                                 cedula=st.get("cedula"))
     elif body:
         await _waha_send(
             phone,
