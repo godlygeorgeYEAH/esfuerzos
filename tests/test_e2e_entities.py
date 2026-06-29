@@ -55,9 +55,20 @@ _TEST_PREFIX = "e2eaudit"
 _created_source_urls: set[str] = set()
 
 
-async def _db_report(phone: str) -> dict | None:
-    # P0-b: report key is per-report (in-memory W._report_keys), not md5(phone).
+async def _session_rkey(phone: str) -> str | None:
+    """Read the current report key from waha_sessions (in-memory is evicted by B4)."""
     rk = W._report_keys.get(phone)
+    if rk:
+        return rk
+    async with httpx.AsyncClient(timeout=15) as cl:
+        r = await cl.get(f"{SB}/rest/v1/waha_sessions", headers=H,
+                         params={"phone": f"eq.{phone}", "select": "state", "limit": "1"})
+        rows = r.json() if r.status_code == 200 else []
+    return (rows[0].get("state") or {}).get("rkey") if rows else None
+
+
+async def _db_report(phone: str) -> dict | None:
+    rk = await _session_rkey(phone)
     if not rk:
         return None
     async with httpx.AsyncClient(timeout=15) as cl:
@@ -76,13 +87,17 @@ async def _run(phone: str, msgs: list[str], media_url: str | None = None) -> lis
     W._collected.pop(phone, None)
     W._searched_shown.discard(phone)
     W._report_keys.pop(phone, None)
+    # Clear any persisted session (B3) so a prior run's state never bleeds in.
+    async with httpx.AsyncClient(timeout=10) as cl:
+        await cl.delete(f"{SB}/rest/v1/waha_sessions", headers=H, params={"phone": f"eq.{phone}"})
     for i, m in enumerate(msgs):
         payload = {"from": phone, "body": m, "hasMedia": bool(media_url and i == len(msgs) - 1),
                    "id": f"{_TEST_PREFIX}_{uuid.uuid4()}"}
         if media_url and i == len(msgs) - 1:
             payload["media"] = {"url": media_url}
         await W._handle_message(payload, _APP)
-    rk = W._report_keys.get(phone)
+        await asyncio.sleep(2.5)  # pace Groq free-tier (stay under 30/min)
+    rk = await _session_rkey(phone)  # in-memory evicted by B4; read from session
     if rk:
         _created_source_urls.add(f"waha:{rk}")
     return list(_REPLIES)
