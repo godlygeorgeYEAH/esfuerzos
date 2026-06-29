@@ -74,13 +74,15 @@ async def lifespan(app: FastAPI):
 
     scrapers = _make_scrapers()
     scheduler = AsyncIOScheduler(timezone="UTC")
+    # jitter spreads the fire times so all 14 scrapers don't hit Supabase/sources
+    # at the same instant every interval (thundering herd).
     for name in scrapers:
         scheduler.add_job(
-            _run_poll, IntervalTrigger(seconds=300),
+            _run_poll, IntervalTrigger(seconds=300, jitter=60),
             args=[name, scrapers], id=f"{name}_poll", max_instances=1,
         )
         scheduler.add_job(
-            _run_full, IntervalTrigger(seconds=3600),
+            _run_full, IntervalTrigger(seconds=3600, jitter=300),
             args=[name, scrapers], id=f"{name}_full", max_instances=1,
         )
     scheduler.start()
@@ -342,9 +344,6 @@ async def admin_list_matches(
         # Skip cross-source duplicates of the same person (either side).
         if miss.get("dup") or found.get("dup"):
             continue
-        # Searched person already marked located -> drop all their candidates.
-        if miss.get("person_state") == "found":
-            continue
         found["is_hospital"] = found.get("source") in _HOSPITAL_SOURCES
         if mode in ("high", "hospital"):
             # The reunification that matters: buscado -> ENCONTRADO en hospital/refugio.
@@ -387,15 +386,24 @@ async def admin_match_review(
     if decision not in ("confirmed", "rejected", "found"):
         raise HTTPException(status_code=400, detail="decision must be confirmed|rejected|found")
     from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
     sb = settings.supabase_url.rstrip("/")
     k = settings.supabase_service_role_key
     read_hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
     write_hdr = {**read_hdr, "Content-Type": "application/json", "Prefer": "return=minimal"}
-    payload = {"status": decision, "reviewer": "dashboard",
-               "reviewed_at": datetime.now(timezone.utc).isoformat()}
+    # 'found' = a real located-person match the family is NOT alerted about. The
+    # match_status enum is pending|confirmed|rejected (there is no 'found'), and
+    # person_state has no 'found' value either, so record it as confirmed +
+    # notify_sent=true (the notifier skips it). Previously this wrote status='found'
+    # and person_state='found', BOTH rejected by the enums → the feature 400'd.
+    if decision == "found":
+        payload = {"status": "confirmed", "notify_sent": True,
+                   "reviewer": "dashboard", "reviewed_at": now}
+    else:
+        payload = {"status": decision, "reviewer": "dashboard", "reviewed_at": now}
     async with httpx.AsyncClient(timeout=15) as cl:
         # Always fetch both sides upfront: needed for the audit log and for
-        # the 'found' branch that must resolve missing_id server-side.
+        # the 'found' branch that resolves the located person's other candidates.
         mr = await cl.get(f"{sb}/rest/v1/matches", headers=read_hdr,
                           params={"id": f"eq.{match_id}",
                                   "select": "missing_id,found_id", "limit": "1"})
@@ -405,17 +413,19 @@ async def admin_match_review(
         missing_id = match_rows[0].get("missing_id")
         found_id = match_rows[0].get("found_id")
 
-        if decision == "found":
-            if not missing_id:
-                raise HTTPException(status_code=404, detail="match missing_id not found")
-            await cl.patch(f"{sb}/rest/v1/reports", headers=write_hdr,
-                           params={"id": f"eq.{missing_id}"},
-                           json={"person_state": "found"})
-
         resp = await cl.patch(f"{sb}/rest/v1/matches", headers=write_hdr,
                               params={"id": f"eq.{match_id}"},
                               json=payload)
         ok = resp.status_code in (200, 204)
+
+        # 'found': the searched person is located → auto-reject their OTHER pending
+        # candidates so they stop appearing in the queue (replaces the old invalid
+        # person_state='found' flag).
+        if decision == "found" and missing_id:
+            await cl.patch(f"{sb}/rest/v1/matches", headers=write_hdr,
+                           params={"missing_id": f"eq.{missing_id}",
+                                   "status": "eq.pending", "id": f"neq.{match_id}"},
+                           json={"status": "rejected", "reviewer": "dashboard", "reviewed_at": now})
 
         # Write audit log entry — best-effort, never fails the review itself.
         try:
@@ -495,6 +505,34 @@ _PHOTO_KEYS = ("foto_url", "photoUrl", "photo_url", "foto", "image_url", "imageU
 _PHOTO_BASE = {"venezuela_te_busca": "https://venezuelatebusca.com"}
 
 
+def _is_public_http_url(url: str) -> bool:
+    """SSRF guard: allow only http(s) to a publicly-routable IP. Scraper-controlled
+    foto_url values flow into the photo proxy, so block private/loopback/link-local
+    (e.g. cloud metadata at 169.254.169.254) before the server fetches them."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(p.hostname, None)
+    except Exception:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
+
+
 def _resolve_photo_url(report: dict) -> str | None:
     """Best displayable image URL for a report: original source photo from
     raw_data first (resolving relative paths), else a stored photo URL."""
@@ -513,15 +551,17 @@ def _resolve_photo_url(report: dict) -> str | None:
 
 
 @app.get("/admin/photo/{report_id}")
-async def admin_photo(report_id: str, k: str = "", x_admin_key: str = Header(default="")):
+async def admin_photo(report_id: str, x_admin_key: str = Header(default="")):
     """Admin-gated image proxy: streams a report's photo so faces can be reviewed
-    without re-exposing a public photo mount. Auth via header or ?k= (the latter
-    lets <img src> work; access is SSH-tunnel-only behind the firewall)."""
-    _check_admin(x_admin_key or k)
+    without re-exposing a public photo mount. Auth via the X-Admin-Key header only
+    (the dashboard fetches it as a blob) so the key never lands in access logs."""
+    _check_admin(x_admin_key)
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
     hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+    # follow_redirects=False: the final photo URL is third-party (scraper-supplied),
+    # so a redirect could bounce the fetch to an internal host past the SSRF check.
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as cl:
         rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
             "id": f"eq.{report_id}", "select": "source,raw_data", "limit": "1"})
         rows = rr.json() if rr.status_code == 200 else []
@@ -535,6 +575,8 @@ async def admin_photo(report_id: str, k: str = "", x_admin_key: str = Header(def
             url = sp if sp.startswith("http") else None
         if not url:
             raise HTTPException(status_code=404, detail="no photo")
+        if not _is_public_http_url(url):
+            raise HTTPException(status_code=400, detail="photo url blocked")
         try:
             img = await cl.get(url, headers={"User-Agent": "Mozilla/5.0 (ReuneVE-admin)"})
             if img.status_code != 200 or not img.content:

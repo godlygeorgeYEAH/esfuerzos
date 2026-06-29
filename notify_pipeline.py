@@ -32,7 +32,7 @@ from typing import Any
 import httpx
 
 from config import get_settings
-from waha_intake import _waha_send, _source_label
+from waha_intake import _waha_send, _source_label, _sanitize_reply
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -58,13 +58,16 @@ def _message(reported_name: str | None, other: dict) -> str:
     loc = other.get("last_seen_location") or "ubicación por confirmar"
     src = _source_label(other.get("source", ""))
     matched_name = other.get("full_name") or "una persona"
-    return (
+    msg = (
         f"🔔 Reúne VE: encontramos una *posible coincidencia* para {who}.\n"
         f"Coincide con: *{matched_name}* — {loc} (via {src}).\n\n"
         "Esto es preliminar y está *en verificación*, no es una confirmación. "
         "Nuestro equipo revisará y te contactará. "
         "Si ya reuniste a tu familiar, respóndenos para cerrar el caso."
     )
+    # Defense-in-depth: name/location come from third-party scraped data. Strip any
+    # death claim / false-confirmation phrasing before it reaches a family.
+    return _sanitize_reply(msg)
 
 
 def _within_cooldown(last_notified_at: str | None, now: datetime) -> bool:

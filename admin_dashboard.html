@@ -87,7 +87,7 @@ const $ = s => document.querySelector(s);
 const list = $('#list');
 // Sources that mean the person was physically located in a hospital or shelter
 // (fallback; the server also sends found.is_hospital).
-const HOSP = new Set(['pacientes_terremoto','google_drive_hospital','hospitales_ve','hospital_consolidado','hospitales_26jun']);
+const HOSP = new Set(['pacientes_terremoto','google_drive_hospital','hospitales_ve','hospital_consolidado','hospitales_26jun','localizave']);
 const getKey = () => localStorage.getItem('ak') || '';
 let MODE = localStorage.getItem('mode') || 'high';  // 'high' = cara/cédula, 'all' = incluye texto
 const pct = x => Math.round((x || 0) * 100);
@@ -117,7 +117,9 @@ function side(p, role) {
     : esc(p.source);
   let badge = hosp ? '<span class="badge b-hosp">🏥 EN HOSPITAL/REFUGIO</span>' : '';
   if (dead) badge += ' <span class="badge b-dead">✝ FALLECIDO/A</span>';
-  const img = `<img class="photo" loading="lazy" src="/admin/photo/${encodeURIComponent(p.id)}?k=${encodeURIComponent(getKey())}" onerror="this.remove()">`;
+  // Photo loaded via fetch+blob (see hydratePhotos) so the ADMIN_KEY rides in the
+  // X-Admin-Key header instead of the URL query string (which leaks into logs).
+  const img = `<img class="photo" loading="lazy" data-pid="${encodeURIComponent(p.id)}" onerror="this.remove()">`;
   const marks = p.distinguishing_marks ? `<div class="marks">${esc(p.distinguishing_marks)}</div>` : '';
   const deadNote = dead ? '<div class="dead-note">⚠ Registro marcado como fallecido en la fuente. Verifica con extremo cuidado; la notificación a la familia debe ser sensible.</div>' : '';
   return `<div class="side"><h3>${role} ${badge}</h3>`
@@ -157,7 +159,22 @@ async function load() {
     if (!ms.length) { list.innerHTML = '<div class="empty">✓ No hay coincidencias pendientes.</div>'; return; }
     list.innerHTML = '';
     ms.forEach(m => list.appendChild(card(m)));
+    hydratePhotos(list);
   } catch (e) { list.innerHTML = '<div class="empty">Error de red.</div>'; }
+}
+
+// Fetch each photo with the admin key in a header (not the URL) and swap in the
+// blob. Keeps ADMIN_KEY out of access logs / browser history / Referer.
+function hydratePhotos(root) {
+  root.querySelectorAll('img.photo[data-pid]').forEach(async (im) => {
+    const pid = im.dataset.pid;
+    try {
+      const r = await fetch(`/admin/photo/${pid}`, { headers: { 'X-Admin-Key': getKey() } });
+      if (!r.ok) { im.remove(); return; }
+      im.src = URL.createObjectURL(await r.blob());
+      im.addEventListener('load', () => URL.revokeObjectURL(im.src), { once: true });
+    } catch (e) { im.remove(); }
+  });
 }
 
 list.addEventListener('click', async (ev) => {

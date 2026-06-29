@@ -32,6 +32,13 @@ settings = get_settings()
 _MAX_ATTEMPTS_PER_PROVIDER = 2   # 1 retry on 429 before moving to the next provider
 _RETRY_CAP = 4.0                 # seconds; never leave a WhatsApp user hanging longer
 
+# Bound concurrent LLM calls. Each webhook message is a BackgroundTask that may hold
+# a provider call for many seconds; without a ceiling a surge of distinct phones
+# piles up tasks (each holding an httpx client + a Groq slot) and grows memory toward
+# the container limit. Excess callers wait here instead of hammering the providers.
+_MAX_CONCURRENT = 8
+_LLM_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT)
+
 
 class LLMUnavailable(Exception):
     """Every provider in the chain failed. `rate_limited` is True when at least
@@ -123,7 +130,8 @@ async def chat_json(messages: list[dict], *, temperature: float = 0.3,
     provider that responds. Raises LLMUnavailable if all providers fail."""
     last_error: object = None
     rate_limited_any = False
-    for prov in PROVIDERS:
+    async with _LLM_SEMAPHORE:
+      for prov in PROVIDERS:
         url = prov["base_url"].rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json", **prov.get("headers", {})}
         if prov.get("api_key"):

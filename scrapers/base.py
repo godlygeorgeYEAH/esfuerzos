@@ -475,10 +475,18 @@ class BaseScraper(ABC):
         logger.info("[%s] poll done: %s", self.source_name, stats)
         return stats
 
+    # Safety bound: stop paginating after this many pages so a source that never
+    # returns an empty page (API quirk / loop) can't spin forever each sweep.
+    _MAX_FULL_PAGES = 2000
+
     async def run_full(self, poll_interval: int = 3600) -> dict:
         stats: dict[str, int] = {"inserted": 0, "updated": 0, "errors": 0}
         page = 1
         while True:
+            if page > self._MAX_FULL_PAGES:
+                logger.warning("[%s] full sweep hit page cap %d — stopping",
+                               self.source_name, self._MAX_FULL_PAGES)
+                break
             try:
                 rows = await self.fetch_page(page)
             except Exception as exc:

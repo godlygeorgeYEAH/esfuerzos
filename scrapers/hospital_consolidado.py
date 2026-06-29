@@ -25,6 +25,7 @@ Dependency: openpyxl (added to requirements.txt). The image must be rebuilt
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -250,7 +251,9 @@ class HospitalConsolidadoScraper(BaseVEScraper):
         error: str | None = None
         try:
             data = await self._download()
-            reports = parse_workbook(data)
+            # Parse off the event loop: openpyxl iterating ~13k rows is pure-Python
+            # CPU and would otherwise freeze webhook handling for seconds.
+            reports = await asyncio.to_thread(parse_workbook, data)
             logger.info("hospital_consolidado: parsed %d rows from workbook", len(reports))
             total = await self._upsert_batch(reports)
         except Exception as exc:  # noqa: BLE001

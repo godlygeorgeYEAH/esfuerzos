@@ -18,7 +18,10 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TYPE report_kind  AS ENUM ('missing', 'found');
-CREATE TYPE person_state AS ENUM ('unknown', 'found', 'deceased', 'discharged', 'injured');
+-- person_state verified against the LIVE DB by insert-probe (2026-06-29): only these
+-- four are accepted; 'found' and 'discharged' are REJECTED (400). Scrapers write
+-- 'alive' for located patients. Do not assume 'found'/'discharged' exist.
+CREATE TYPE person_state AS ENUM ('unknown', 'alive', 'injured', 'deceased');
 CREATE TYPE match_status AS ENUM ('pending', 'confirmed', 'rejected');
 
 CREATE TABLE reports (

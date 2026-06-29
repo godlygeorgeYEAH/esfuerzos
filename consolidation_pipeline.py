@@ -150,6 +150,7 @@ async def compute_text_embeddings(
                     continue
                 valid_rows.append((row["id"], text))
 
+            embedded_this_batch = 0  # rows that LEFT the null set this iteration
             if valid_rows:
                 try:
                     import numpy as np
@@ -183,6 +184,7 @@ async def compute_text_embeddings(
                     ok = sum(1 for r in results if r is True)
                     processed += ok
                     errors += len(results) - ok
+                    embedded_this_batch = ok
                 except Exception as exc:
                     logger.error("Phase 1: batch embed error offset=%d: %s", offset, exc)
                     errors += len(valid_rows)
@@ -191,7 +193,11 @@ async def compute_text_embeddings(
                 "Phase 1 kind=%s: offset=%d processed=%d noise=%d errors=%d",
                 kind_filter, offset, processed, skipped_noise, errors,
             )
-            offset += batch_size
+            # Embedded rows leave the `text_embedding IS NULL` set, so advance only
+            # past rows that stayed null (noise + patch failures). Advancing by the
+            # full batch would step over unprocessed rows as the result set shrinks,
+            # draining only part of the backlog per run.
+            offset += len(rows) - embedded_this_batch
             await asyncio.sleep(0)
 
     return {"processed": processed, "skipped_noise": skipped_noise, "errors": errors}

@@ -169,10 +169,11 @@ Todos convergen en `reports` con `source` marcando el origen; único por `(sourc
 |---|---|---|
 | `hospital_consolidado` | xlsx maestro "Registro de Pacientes SISMO 2026" (Dropbox, 19 tabs) | **sí** |
 | `localizave` | localizave.com `/api/pacientes` (hospitales) | **sí** |
-| `hospitales_26jun` | lista consolidada 26-jun | a veces |
 | `pacientes_terremoto` | pacientesterremotovzla.lovable.app (Supabase REST) | no |
 | `google_drive_hospital` | registro hospitalario en Google Docs | no |
 | `hospitales_ve` | otra Supabase de hospitales (requiere key) | no |
+
+> `hospitales_26jun` aparece como `source` en `_HOSPITAL_SOURCES` pero **no es un scraper activo**: son datos de un bulk-import puntual del 26-jun (sin archivo en `scrapers/`, no registrado en el orquestador).
 
 **Agregadores ciudadanos / "se busca"** (referencia secundaria):
 `venezuela_te_busca`, `venezreporta`, `terremotove`, `tuayudave`, `localizados_venezuela`,
@@ -249,7 +250,7 @@ Tablas principales:
 - **`bot_subscribers`** — `report_id` → teléfono del familiar (para notificar).
 - **`waha_sessions`** — estado del formulario por teléfono.
 - **`llm_leads`** — cola de revisión del panel LLM.
-- **`canonical_reports`** (vista) — `reports` sin duplicados (migración 014, pendiente de aplicar).
+- **`canonical_reports`** (vista) — `reports` sin duplicados (migración 014, **aplicada/live**).
 
 > ⚠ **Drift:** las migraciones numeradas están desfasadas vs la DB viva. **La DB viva manda.** Fuente de
 > verdad: `migrations/000_current_schema_reference.sql` + `DATA-MODEL.md`.
@@ -264,8 +265,9 @@ Tablas principales:
 | `POST /webhook/waha` | POST | HMAC sha512 | Webhook entrante de WhatsApp |
 | `GET /admin/dashboard` | GET | (shell público, datos por clave) | Panel de aprobación humana |
 | `GET /admin/matches` | GET | X-Admin-Key | Cola de coincidencias (modos high/hospital/all) |
-| `POST /admin/match-review` | POST | X-Admin-Key | Aprobar/rechazar un match |
-| `GET /admin/photo/{report_id}` | GET | X-Admin-Key o `?k=` | Proxy de foto (gated) |
+| `POST /admin/match-review` | POST | X-Admin-Key | Decidir un match: `confirmed` (notifica) / `rejected` / `found` (localizado, sin notificar) |
+| `GET /admin/review-log` | GET | X-Admin-Key | Log de auditoría de decisiones (paginado) |
+| `GET /admin/photo/{report_id}` | GET | X-Admin-Key (header) | Proxy de foto (gated; key solo por header, no en URL) |
 | `POST /admin/consolidate` | POST | X-Admin-Key | Corre fases de embedding/match |
 | `POST /admin/llm-scrape` / `llm-approve` | POST | X-Admin-Key | Panel LLM: extrae a `llm_leads` / aprueba |
 | `POST /admin/bulk_import` | POST | X-Admin-Key | Importa datos históricos en batch |
@@ -354,5 +356,5 @@ reconstruir. La autoritativa del esquema vivo es `migrations/000_current_schema_
 002_unique_constraint.sql         ← UNIQUE(source, source_url)
 009_fix_rpc_volatile.sql          ← FIX RPC pgvector (SET ivfflat.probes a nivel función)
 010_bot_subscribers.sql · 011_grants_and_llm_leads.sql · 012_drop_anon_read.sql · 013_waha_sessions.sql
-014_canonical_view.sql            ← vista canonical_reports (PENDIENTE de aplicar)
+014_canonical_view.sql            ← vista canonical_reports (aplicada/live)
 ```

@@ -24,7 +24,7 @@ erDiagram
         float last_seen_lng
         text distinguishing_marks "lleva 'CI: <cedula>' para exact-match"
         text clothing
-        person_state person_state "unknown|found|deceased|discharged|..."
+        person_state person_state "unknown|alive|injured|deceased"
         text reporter_wa_hash "hash del telefono (PII)"
         text reporter_contact_enc "contacto cifrado (PII)"
         text source "scraper o waha_whatsapp"
@@ -106,7 +106,7 @@ erDiagram
 
 ## Enums (tipos Postgres)
 - `report_kind`: `missing` | `found`
-- `person_state`: `unknown` | `found` | `deceased` | `discharged` (+ los que escriba el ingest)
+- `person_state`: `unknown` | `alive` | `injured` | `deceased` (enum vivo verificado 2026-06-29; `found`/`discharged` NO son válidos, los rechaza con 400)
 - `match_status`: `pending` | `confirmed` | `rejected`
 
 ## Flujo de datos

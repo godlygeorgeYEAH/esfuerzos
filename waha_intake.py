@@ -237,6 +237,10 @@ SOURCE_LABELS: dict[str, str] = {
     "hospitales_ve": "Hospitales VE",
     "redayuda_ve": "Red Ayuda VE",
     "tuayudave": "Tu Ayuda VE",
+    "hospital_consolidado": "Hospitales (consolidado)",
+    "localizave": "LocalizaVE (hospitales)",
+    "desaparecidos_venezuela": "Desaparecidos Venezuela",
+    "hospitales_26jun": "Hospitales (26-jun)",
     "waha_whatsapp": "Reúne VE (WhatsApp)",
 }
 
@@ -588,16 +592,52 @@ def _format_state(state: dict) -> str:
     return "ESTADO ACTUAL DEL REPORTE (no vuelvas a pedir estos): " + "; ".join(known)
 
 
+# PII masking before the LLM. Cédula (national ID) and phone are high-sensitivity in
+# a crisis; free-tier fallback providers may retain/train on inputs. Capture them
+# locally (digits only) and replace with placeholders so the raw values never leave
+# the box. Phone first (11-digit 04xx pattern is more specific than a cédula run).
+_PII_PHONE_RE = re.compile(r"(?:\+?58[-\s]?)?0?4\d{2}[-\s]?\d{3}[-\s]?\d{4}")
+_PII_CEDULA_RE = re.compile(
+    r"(?<!\d)(?:[VvEeJjGg][-.\s]?)?\d{1,2}[.\s]?\d{3}[.\s]?\d{3}(?!\d)|(?<!\d)\d{6,9}(?!\d)")
+
+
+def _extract_and_mask_pii(text: str) -> tuple[str, dict]:
+    """Return (masked_text, {cedula?, contact?}) — digits only, no separators."""
+    found: dict[str, str] = {}
+
+    def _phone(m):
+        found["contact"] = re.sub(r"\D", "", m.group(0))
+        return "[TELEFONO]"
+
+    def _ced(m):
+        found["cedula"] = re.sub(r"\D", "", m.group(0))
+        return "[CEDULA]"
+
+    masked = _PII_PHONE_RE.sub(_phone, text or "")
+    masked = _PII_CEDULA_RE.sub(_ced, masked)
+    return masked, found
+
+
 async def _llm_extract(phone: str, new_message: str) -> dict:
     """Call Groq to extract report data and generate reply. Injects the running
     accumulated state so the LLM never re-asks known fields, and merges the new
     extraction into that state so downstream always sees the full report."""
-    history = list(_conv_state[phone])[-_HISTORY_MAX:]  # cap tokens/min usage
+    # Mask PII before it reaches any provider; fill _collected so the deterministic
+    # form still has the values (setdefault: never clobber an existing field).
+    masked_message, pii = _extract_and_mask_pii(new_message)
+    for k, v in pii.items():
+        _collected[phone].setdefault(k, v)
+    # History user turns may also carry raw PII from earlier messages — mask them too.
+    history = [
+        {"role": h["role"],
+         "content": _extract_and_mask_pii(h["content"])[0] if h.get("role") == "user" else h["content"]}
+        for h in list(_conv_state[phone])[-_HISTORY_MAX:]  # cap tokens/min usage
+    ]
     state = _collected[phone]
     system = _SYSTEM_PROMPT + "\n\n" + _format_state(state)
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
-    messages.append({"role": "user", "content": new_message})
+    messages.append({"role": "user", "content": masked_message})
 
     try:
         result = await chat_json(messages, temperature=0.3, max_tokens=400, timeout=15)
@@ -753,6 +793,11 @@ async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
         "last_seen_location": data.get("location"),
         "distinguishing_marks": marks or None,
     }
+    # Preserve a reporter-supplied callback number (may differ from the WhatsApp
+    # number) so it is not silently lost; notifications still go to the WA phone.
+    contact = (data.get("contact") or "").strip()
+    if contact:
+        row["raw_data"] = {"reporter_contact": contact}
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
             resp = await cl.post(
@@ -892,6 +937,21 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
         await _waha_send(phone, "Recibí la foto. Para buscarla, dime el nombre o los datos de la persona.")
 
 
+# Per-phone lock: webhook messages arrive as concurrent BackgroundTasks. Two quick
+# messages from the same number (e.g. name then location) would otherwise interleave
+# load→process→save→evict and clobber each other's in-flight fields. Serialize per
+# phone so a single number's turn always completes before the next one starts.
+_phone_locks: dict[str, asyncio.Lock] = {}
+
+
+def _phone_lock(phone: str) -> asyncio.Lock:
+    lk = _phone_locks.get(phone)
+    if lk is None:
+        lk = asyncio.Lock()
+        _phone_locks[phone] = lk
+    return lk
+
+
 async def _handle_message(payload: dict, app: Any) -> None:
     phone = payload.get("from", "")
     if payload.get("fromMe", False) or not phone:
@@ -900,15 +960,18 @@ async def _handle_message(payload: dict, app: Any) -> None:
     if _phone_rate_limited(phone):
         logger.warning("rate-limited phone %s (>%d/%ds)", _hp(phone), _RATE_MAX, int(_RATE_WINDOW))
         return
-    # B3: hydrate durable session → process → persist + evict from memory (B4).
-    await _load_session(phone)
-    try:
-        await _process_message(payload, phone, app)
-    finally:
-        # Evict from memory ONLY if the state was durably saved (B4). If the
-        # waha_sessions table isn't there yet, keep in-memory (degrade safely).
-        if await _save_session(phone):
-            _evict_memory(phone)
+    # Serialize this phone's messages (see _phone_lock) so concurrent webhooks
+    # for the same number can't corrupt or drop the in-flight report state.
+    async with _phone_lock(phone):
+        # B3: hydrate durable session → process → persist + evict from memory (B4).
+        await _load_session(phone)
+        try:
+            await _process_message(payload, phone, app)
+        finally:
+            # Evict from memory ONLY if the state was durably saved (B4). If the
+            # waha_sessions table isn't there yet, keep in-memory (degrade safely).
+            if await _save_session(phone):
+                _evict_memory(phone)
 
 
 def _reset_form(phone: str) -> None:
@@ -1212,6 +1275,8 @@ async def waha_webhook(request: Request, background_tasks: BackgroundTasks) -> d
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        return {"ok": True}
+    if not isinstance(data, dict):  # valid JSON but a list/string/number → ignore
         return {"ok": True}
 
     event = data.get("event", "")
