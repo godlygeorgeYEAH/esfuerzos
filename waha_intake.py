@@ -245,8 +245,14 @@ def _source_label(source: str) -> str:
     return SOURCE_LABELS.get(source, source or "fuente externa")
 
 
-def _resolve_source_url(source: str, source_url: str | None) -> str | None:
-    """Turn a stored source_url into a real, openable URL when we know how."""
+def resolve_source_url(source: str, source_url: str | None) -> str | None:
+    """Turn a stored source_url into a real, openable URL when we know how.
+
+    source_url doubles as the (source, source_url) dedup key, so for many
+    scrapers it is a synthetic '<scheme>:<id>' token, not a link. Reconstruct a
+    real URL per source; 'found' (hospital/shelter) sources, which have no
+    per-record page, point to their original source document. Shared by the
+    WhatsApp bot and the review dashboard."""
     if not source_url:
         return None
     # sos_venezuela stores per-person detail URLs that 404 (only the site root
@@ -255,6 +261,15 @@ def _resolve_source_url(source: str, source_url: str | None) -> str | None:
         return "https://sosvenezuela2026.com"
     if source_url.startswith("http"):
         return source_url
+    # google_drive_hospital: 'gdrive:{doc_id}:{name}' -> the source Google Doc.
+    if source_url.startswith("gdrive:"):
+        doc_id = source_url.split(":", 2)[1]
+        return f"https://docs.google.com/document/d/{doc_id}/edit" if doc_id else None
+    # hospital_consolidado: every row is parsed from one source spreadsheet;
+    # reuse the scraper's URL so an env override stays in sync.
+    if source == "hospital_consolidado":
+        from scrapers.hospital_consolidado import _XLSX_URL
+        return _XLSX_URL
     # source_url is "<scheme>:<id>" for several scrapers
     ident = source_url.split(":", 1)[1] if ":" in source_url else source_url
     if source == "venezuela_te_busca":
@@ -265,6 +280,8 @@ def _resolve_source_url(source: str, source_url: str | None) -> str | None:
         return "https://tuayudave.com"
     if source == "sos_laguaira":
         return "https://soslaguaira.lat"
+    if source == "pacientes_terremoto":
+        return "https://pacientesterremotovzla.lovable.app"
     return None
 
 
@@ -289,7 +306,7 @@ def _format_match_line(m: dict) -> str:
     label = _source_label(m.get("source", ""))
     age_part = f", {age} años" if age else ""
     line = f"• {name}{age_part} — {loc} [{label}]"
-    url = _resolve_source_url(m.get("source", ""), m.get("source_url"))
+    url = resolve_source_url(m.get("source", ""), m.get("source_url"))
     if url:
         line += f"\n  {url}"
     return line
@@ -664,7 +681,7 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
                     "name": rep.get("full_name"),
                     "location": rep.get("last_seen_location"),
                     "source": rep.get("source"),
-                    "url": _resolve_source_url(rep.get("source", ""), rep.get("source_url")),
+                    "url": resolve_source_url(rep.get("source", ""), rep.get("source_url")),
                 }
     except Exception as exc:
         logger.warning("lookup_match_details failed: %s", exc)

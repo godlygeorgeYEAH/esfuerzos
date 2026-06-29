@@ -78,8 +78,11 @@ function side(p, role) {
   const dead = p.person_state === 'deceased';
   const age = p.age ? `, ${esc(p.age)} años` : '';
   const loc = esc(p.last_seen_location || 'ubicación por confirmar');
-  const src = p.source_url
-    ? `<a href="${esc(p.source_url)}" target="_blank" rel="noopener">${esc(p.source)}</a>`
+  // Only link when the backend resolved a real http(s) URL; otherwise the
+  // source name is plain text (source_url is a dedup key for many sources).
+  const link = p.source_link || '';
+  const src = /^https?:\/\//.test(link)
+    ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.source)}</a>`
     : esc(p.source);
   let badge = hosp ? '<span class="badge b-hosp">🏥 EN HOSPITAL/REFUGIO</span>' : '';
   if (dead) badge += ' <span class="badge b-dead">✝ FALLECIDO/A</span>';

@@ -44,7 +44,7 @@ from dedup_pipeline import run_dedup_pipeline
 from face_backfill import run_face_backfill
 from notify_pipeline import run_match_notifier
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
-from waha_intake import router as waha_router
+from waha_intake import router as waha_router, resolve_source_url
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -355,6 +355,10 @@ async def admin_list_matches(
         if m.get("missing_id") in seen_missing:
             continue
         seen_missing.add(m.get("missing_id"))
+        # Resolve a clickable public link per side (source_url is overloaded as a
+        # dedup key for many sources, so it is not always a real URL).
+        miss["source_link"] = resolve_source_url(miss.get("source", ""), miss.get("source_url"))
+        found["source_link"] = resolve_source_url(found.get("source", ""), found.get("source_url"))
         m["missing"] = miss
         m["found"] = found
         out.append(m)
