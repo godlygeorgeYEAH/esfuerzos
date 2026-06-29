@@ -303,7 +303,7 @@ async def admin_list_matches(
         "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,created_at",
         "status": f"eq.{status}",
         "order": "combined_score.desc",
-        "limit": "400",  # fetch wide, then dedup/collapse down to `limit`
+        "limit": "1000" if mode != "all" else "400",  # fetch wide, then filter/collapse
     }
     if mode == "high":
         # face match OR near-exact (cédula lands combined=1.0)
@@ -331,11 +331,19 @@ async def admin_list_matches(
         # Skip cross-source duplicates of the same person (either side).
         if miss.get("dup") or found.get("dup"):
             continue
+        found["is_hospital"] = found.get("source") in _HOSPITAL_SOURCES
+        if mode in ("high", "hospital"):
+            # The reunification that matters: buscado -> ENCONTRADO en hospital/refugio.
+            if not found["is_hospital"]:
+                continue
+            # A real match links DIFFERENT sources, not two entries on the same
+            # board (same-source face=1.0 is usually a reused/placeholder photo).
+            if miss.get("source") and miss.get("source") == found.get("source"):
+                continue
         # One best (highest combined, already sorted) candidate per buscado.
         if m.get("missing_id") in seen_missing:
             continue
         seen_missing.add(m.get("missing_id"))
-        found["is_hospital"] = found.get("source") in _HOSPITAL_SOURCES
         m["missing"] = miss
         m["found"] = found
         out.append(m)

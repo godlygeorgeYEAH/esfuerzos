@@ -63,11 +63,13 @@ const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 if (getKey()) $('#key').value = getKey();
-function syncModeBtn() { $('#mode').textContent = MODE === 'high' ? 'Modo: alta confianza' : 'Modo: todos (incl. texto)'; }
+const MODE_LABEL = { high: 'Modo: hospital alta confianza', hospital: 'Modo: hospital (incl. nombre)', all: 'Modo: todos (incl. texto/dups)' };
+const MODE_NEXT = { high: 'hospital', hospital: 'all', all: 'high' };
+function syncModeBtn() { $('#mode').textContent = MODE_LABEL[MODE] || MODE_LABEL.high; }
 syncModeBtn();
 $('#save').onclick = () => { localStorage.setItem('ak', $('#key').value.trim()); load(); };
 $('#reload').onclick = load;
-$('#mode').onclick = () => { MODE = MODE === 'high' ? 'all' : 'high'; localStorage.setItem('mode', MODE); syncModeBtn(); load(); };
+$('#mode').onclick = () => { MODE = MODE_NEXT[MODE] || 'high'; localStorage.setItem('mode', MODE); syncModeBtn(); load(); };
 
 function side(p, role) {
   if (!p) return `<div class="side"><h3>${role}</h3><div class="muted">sin datos</div></div>`;
