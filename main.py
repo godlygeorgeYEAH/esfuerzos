@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import secrets
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
@@ -32,6 +33,14 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+# ── FASE 1: hacer importable el bot prox (sus módulos usan imports `app.*`) ──
+# prox vive en esfuerzos/modulos/migration_prox y NO se mueve; se añade al path.
+# Debe ir ANTES de importar notify_pipeline (que importa app.services.waha) y el
+# router del bot.
+_PROX_DIR = os.path.join(os.path.dirname(__file__), "esfuerzos", "modulos", "migration_prox")
+if _PROX_DIR not in sys.path:
+    sys.path.insert(0, _PROX_DIR)
+
 from config import get_settings
 from consolidation_pipeline import (
     compute_text_embeddings,
@@ -44,7 +53,7 @@ from dedup_pipeline import run_dedup_pipeline
 from face_backfill import run_face_backfill
 from notify_pipeline import run_match_notifier
 from scraper_orchestrator import _make_scrapers, _run_full, _run_poll, _startup_sweep
-from waha_intake import router as waha_router
+from app.routers.webhook import router as bot_router  # bot prox: FSM + sendList
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,8 +61,8 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 # B1: NO global per-IP default. All WhatsApp webhooks arrive from a single source
 # (the WAHA container), so a per-IP cap would throttle ALL users to one bucket and
-# drop messages in a real surge. Rate limiting is done PER-PHONE in waha_intake
-# instead. The limiter object stays for optional explicit per-route limits.
+# drop messages in a real surge. Rate limiting is done PER-PHONE in the bot
+# webhook (prox, Fase 3.1). The limiter object stays for optional per-route limits.
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 
@@ -71,6 +80,47 @@ async def lifespan(app: FastAPI):
     face_model.prepare(ctx_id=-1, det_size=(640, 640))
     app.state.face_model = face_model
     logger.info("Face model loaded.")
+
+    # ── FASE 1: bootstrap del bot prox (FSM + sendList) ──────────────────────
+    # Crea las tablas del bot en el Postgres LOCAL (DATABASE_URL), siembra el
+    # flujo conversacional y asegura la sesión WAHA (webhook + NOWEB store).
+    # Solo se registran los modelos cuyo runtime usa SQLAlchemy (bot + negocio);
+    # clientes/hospitales/reports los maneja el ecosistema vía Supabase REST.
+    # No crítico: si falla, la API y el scheduler igual arrancan.
+    try:
+        from app.database import SessionLocal, Base, engine
+        from app.models import negocio, bot  # noqa: F401 — registra tablas del bot en Base
+        from app.bot.flow_seeder import seed_default_flow
+        from app.models.negocio import Operacion
+        from app.models.bot import BotConfig, OperacionFlow, FlowTemplate
+        from app.config import get_settings as _prox_settings
+        Base.metadata.create_all(engine)
+        _db = SessionLocal()
+        try:
+            seed_default_flow(_db)
+            _op = _db.query(Operacion).filter_by(slug="reune").first()
+            if not _op:
+                _op = Operacion(nombre="Reúne", slug="reune",
+                                waha_session=_prox_settings().waha_session, is_active=True)
+                _db.add(_op)
+                _db.flush()
+            if not _db.query(BotConfig).filter_by(operacion_id=_op.id).first():
+                _db.add(BotConfig(operacion_id=_op.id, is_bot_active=True,
+                                  enable_intent_detection=False))
+            if not _db.query(OperacionFlow).filter_by(operacion_id=_op.id).first():
+                _flow = _db.query(FlowTemplate).filter_by(is_system_default=True).first()
+                if _flow:
+                    _db.add(OperacionFlow(operacion_id=_op.id,
+                                          flow_template_id=_flow.id, is_active=True))
+            _db.commit()
+            logger.info("prox bot: flujo sembrado y operación 'reune' lista.")
+        finally:
+            _db.close()
+        from app.services.waha import ensure_default_session
+        await ensure_default_session()
+        logger.info("prox bot: sesión WAHA configurada.")
+    except Exception as exc:
+        logger.error("prox bot bootstrap falló (no crítico): %s", exc)
 
     scrapers = _make_scrapers()
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -148,7 +198,7 @@ app.add_middleware(
 # images by URL and does not need these mounts. If an authenticated admin viewer
 # is needed later, serve via a token-gated endpoint or Supabase signed URLs.
 
-app.include_router(waha_router)
+app.include_router(bot_router, prefix="/webhook")  # bot prox sirve POST /webhook/waha
 
 
 @app.get("/health")

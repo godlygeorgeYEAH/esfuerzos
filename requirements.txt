@@ -15,3 +15,11 @@ rapidfuzz==3.9.7
 aiohttp==3.9.5
 beautifulsoup4==4.12.3
 openpyxl==3.1.5
+
+# ── FASE 1: bot prox (FSM + sendList) montado en este proceso ────────────────
+# Estado conversacional en Postgres LOCAL vía SQLAlchemy (no Supabase).
+sqlalchemy==2.0.34
+psycopg2-binary==2.9.9      # driver Postgres para DATABASE_URL
+supabase==2.9.1             # cliente usado por intake/cliente/hospital services
+openai==1.51.0              # AsyncOpenAI → DeepSeek en el IntentDetector
+python-multipart==0.0.12    # uploads en el router del bot

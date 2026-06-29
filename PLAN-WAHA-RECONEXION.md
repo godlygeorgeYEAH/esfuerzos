@@ -89,6 +89,25 @@ El Postgres local corre como contenedor aparte (`db`); no consume de los 2 GB de
 sobrevive `restart`/`down && up`, **no** un `down -v` ni borrado de host → de ahí el
 backup 0.4.
 
+### Verificación ejecutada (2026-06-29) — ✅ COMPLETADA
+
+Probado en host Windows (Docker Compose v2). Resultados:
+
+- [x] `docker compose config` valida sin errores (warning de `version` resuelto).
+- [x] `docker compose up -d db` levanta el servicio; `docker compose ps` reporta
+      `reune-pg ... Up (healthy)`.
+- [x] Logs de arranque limpios: `CREATE DATABASE` + `database system is ready to
+      accept connections`.
+- [x] `pg_isready -U reune -d reune` → `accepting connections`.
+- [x] La base `reune` existe (owner `reune`, encoding UTF8) — confirmado con `\l`.
+- [x] **Durabilidad del volumen (prueba clave)**: `CREATE TABLE ping` + `INSERT` →
+      `docker compose restart db` → `SELECT * FROM ping` devuelve `1` tras el
+      reinicio. El estado sobrevive al restart vía el named volume `esfuerzos_pg_data`.
+
+Notas operativas observadas: en Alpine aparece `sh: locale: not found` / `no usable
+system locales` — inofensivo. `reune-api` aún NO consume `DATABASE_URL` (eso entra en
+Fase 1); por eso la base se probó aislada con `docker compose up -d db`.
+
 ---
 
 ## FASE 1 — Montar prox en el proceso raíz
@@ -108,6 +127,23 @@ backup 0.4.
 mismo `.env`); un solo proceso (reinicio baja el bot, pero retoma por PG durable);
 event-loop compartido con el scheduler (encode de 1 texto corto = ms; jobs pesados ya
 usan executor).
+
+### Estado (2026-06-29) — 🛠️ IMPLEMENTADA, pendiente de verificación en host
+
+Cambios aplicados:
+- `main.py`: `sys.path` → prox importable; quitado `waha_intake` router; montado
+  `app.routers.webhook` en `/webhook/waha`; lifespan crea tablas del bot en el PG
+  local (`Base.metadata.create_all`, solo modelos `bot`+`negocio`), siembra el flujo,
+  asegura operación `reune`/`BotConfig`/`OperacionFlow` y llama `ensure_default_session`.
+- `requirements.txt`: + `sqlalchemy`, `psycopg2-binary`, `supabase`, `openai`,
+  `python-multipart`.
+- `notify_pipeline.py`: repuntado a `app.services.waha.send_message`; `SOURCE_LABELS`
+  y `_source_label` ahora viven aquí; `waha_intake.py` **eliminado**.
+- `tests/test_e2e_entities.py` **eliminado** (probaba el `waha_intake` retirado; los
+  E2E del bot prox se escriben en Fase 4).
+
+Pendiente: **rebuild** de la imagen (`docker compose build reune-api`) por las deps
+nuevas, y verificación de arranque + transporte (ver checklist abajo).
 
 ---
 

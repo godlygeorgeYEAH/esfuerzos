@@ -32,10 +32,39 @@ from typing import Any
 import httpx
 
 from config import get_settings
-from waha_intake import _waha_send, _source_label
+# El envío WhatsApp vive ahora en el bot prox (un solo proceso). main.py añade
+# migration_prox a sys.path antes de importar este módulo, así que app.* resuelve.
+from app.services.waha import send_message as _waha_send_raw
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Etiquetas legibles por fuente (antes vivían en waha_intake.py, ya retirado).
+SOURCE_LABELS: dict[str, str] = {
+    "sos_laguaira": "SOS La Guaira",
+    "venezreporta": "Venezuela Reporta",
+    "sos_venezuela": "SOS Venezuela",
+    "terremotove": "TerremotoVE",
+    "pacientes_terremoto": "Pacientes en Hospitales",
+    "localizados_venezuela": "Localizados Venezuela",
+    "venezuela_te_busca": "Venezuela Te Busca",
+    "reconexion": "Reconexión",
+    "google_drive_hospital": "Directorio Hospitalario",
+    "red_solidaria_venezuela": "Red Solidaria Venezuela",
+    "hospitales_ve": "Hospitales VE",
+    "redayuda_ve": "Red Ayuda VE",
+    "tuayudave": "Tu Ayuda VE",
+    "waha_whatsapp": "Reúne VE (WhatsApp)",
+}
+
+
+def _source_label(source: str) -> str:
+    return SOURCE_LABELS.get(source, source or "fuente externa")
+
+
+async def _waha_send(phone: str, text: str) -> bool:
+    """Envía un texto por WAHA vía el servicio de prox. True si tuvo éxito."""
+    return bool(await _waha_send_raw(phone=phone, message=text, session=settings.waha_session))
 
 # GP rule: notify a family ONLY after a human has verified the match
 # (matches.status='confirmed'). No auto-notify on raw algorithmic score — a false
