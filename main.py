@@ -313,14 +313,18 @@ async def admin_list_matches(
     async with httpx.AsyncClient(timeout=15) as cl:
         r = await cl.get(f"{sb}/rest/v1/matches", headers=hdr, params=params)
         matches = r.json() if r.status_code == 200 else []
-        ids = {m[k2] for m in matches for k2 in ("missing_id", "found_id") if m.get(k2)}
+        ids = list({m[k2] for m in matches for k2 in ("missing_id", "found_id") if m.get(k2)})
+        # Enrich in chunks: a single in.(...) with ~2000 UUIDs overflows the URL.
         reps = {}
-        if ids:
-            rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr, params={
-                "select": "id,full_name,age,last_seen_location,source,source_url,kind,"
-                          "distinguishing_marks,person_state,dup:raw_data->>possible_duplicate_of",
-                "id": f"in.({','.join(ids)})"})
-            reps = {x["id"]: x for x in (rr.json() if rr.status_code == 200 else [])}
+        sel = ("id,full_name,age,last_seen_location,source,source_url,kind,"
+               "distinguishing_marks,person_state,dup:raw_data->>possible_duplicate_of")
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr,
+                              params={"select": sel, "id": f"in.({','.join(chunk)})"})
+            if rr.status_code == 200:
+                for x in rr.json():
+                    reps[x["id"]] = x
     out = []
     seen_missing = set()
     for m in matches:
