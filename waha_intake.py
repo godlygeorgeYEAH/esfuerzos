@@ -79,6 +79,26 @@ _UNIDENTIFIED = "No identificado"
 # every turn). Cleared when the user starts reporting a different person.
 _searched_shown: set[str] = set()
 
+# Deterministic intake form (GP 2026-06-29): the LLM only EXTRACTS fields; a fixed
+# state machine decides what to ask (one field at a time, in order, never twice)
+# and what to answer. Match claims come ONLY from the real search, never the LLM.
+_skipped: dict[str, set] = defaultdict(set)   # fields the user couldn't answer ("no sé")
+_asked: dict[str, str] = {}                   # the field we asked last turn (per phone)
+_FORM_ASK = ["name", "age", "location", "description", "contact"]
+_FORM_Q = {
+    "name": "¿Cuál es el nombre completo de la persona? Si no lo sabes, escribe *no sé*.",
+    "age": "¿Qué edad tiene aproximadamente? (si no sabes, *no sé*)",
+    "location": "¿Dónde la viste por última vez, o dónde la encontraron? Zona, hospital o refugio. (si no sabes, *no sé*)",
+    "description": "¿Alguna seña, ropa o detalle que la distinga? También puedes enviar una *foto*. (si no, *no sé*)",
+    "contact": "¿A qué número te avisamos si aparece? Escribe tu teléfono. (o *no sé*)",
+}
+_SKIP_WORDS = {"no", "no se", "no lo se", "nose", "ninguno", "ninguna", "no tengo",
+               "no aplica", "na", "n/a", "skip", "-", "no sabe", "se desconoce", "x"}
+# Hospital/shelter sources: a candidate from one of these means "ya localizado" —
+# shown FIRST. Keep in sync with main._HOSPITAL_SOURCES.
+_HOSP_SOURCES = {"hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
+                 "google_drive_hospital", "hospitales_ve"}
+
 # Deduplication: msg_id -> timestamp. Clears entries older than 60s.
 _seen_msg_ids: dict[str, float] = {}
 _DEDUP_TTL = 60.0
@@ -138,6 +158,10 @@ async def _load_session(phone: str) -> None:
         _report_keys[phone] = st["rkey"]
     if st.get("searched"):
         _searched_shown.add(phone)
+    if st.get("skipped"):
+        _skipped[phone] = set(st["skipped"])
+    if st.get("asked"):
+        _asked[phone] = st["asked"]
 
 
 async def _save_session(phone: str) -> bool:
@@ -151,6 +175,8 @@ async def _save_session(phone: str) -> bool:
         "collected": _collected.get(phone, {}),
         "rkey": _report_keys.get(phone),
         "searched": phone in _searched_shown,
+        "skipped": sorted(_skipped.get(phone, set())),
+        "asked": _asked.get(phone),
     }
     try:
         async with httpx.AsyncClient(timeout=6) as cl:
@@ -178,6 +204,8 @@ def _evict_memory(phone: str) -> None:
     _collected.pop(phone, None)
     _report_keys.pop(phone, None)
     _searched_shown.discard(phone)
+    _skipped.pop(phone, None)
+    _asked.pop(phone, None)
 
 # Human-readable labels for each scraper source. Shown to families so a match
 # result reads "via Venezuela Reporta" instead of the raw "venezreporta" token.
@@ -518,6 +546,8 @@ async def _llm_extract(phone: str, new_message: str) -> dict:
         _collected[phone].clear()
         _searched_shown.discard(phone)
         _report_keys.pop(phone, None)  # new person → new report key (P0-b)
+        _skipped.pop(phone, None)      # new person → restart the form
+        _asked.pop(phone, None)
     for k, v in ext.items():
         if k != "report_ready" and v not in (None, ""):
             _collected[phone][k] = v
@@ -797,6 +827,93 @@ async def _handle_message(payload: dict, app: Any) -> None:
             _evict_memory(phone)
 
 
+def _field_ok(phone: str, st: dict, field: str, kind: str, has_media: bool) -> bool:
+    """A form field is satisfied if collected, explicitly skipped, or covered by
+    context (a photo covers 'description'; 'name' for an unidentified found person)."""
+    if field in _skipped[phone]:
+        return True
+    if (st.get(field) or "") != "":
+        return True
+    if field == "name" and kind == "found" and has_media:
+        return True
+    if field == "description" and has_media:
+        return True
+    return False
+
+
+def _next_field(phone: str, st: dict, kind: str, has_media: bool) -> str | None:
+    for f in _FORM_ASK:
+        if not _field_ok(phone, st, f, kind, has_media):
+            return f
+    return None
+
+
+async def _search_hospital_matches(name: str, exclude_id: str | None = None) -> list:
+    """Targeted recall against hospital/shelter sources ONLY, so a real
+    'ya localizado' record is never buried under high-volume aggregator results
+    (the general search caps at 15/token by recency and misses them)."""
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    tokens = sorted({t for t in name.strip().split() if len(t) >= 3}, key=len, reverse=True)[:3]
+    if not tokens:
+        return []
+    hosp_in = "in.(" + ",".join(sorted(_HOSP_SOURCES)) + ")"
+    seen: set = set()
+    results: list = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            for token in tokens:
+                params = {
+                    "select": "id,full_name,age,last_seen_location,source,source_url,kind",
+                    "full_name": f"ilike.*{token}*",
+                    "source": hosp_in,
+                    "limit": "40", "order": "created_at.desc",
+                }
+                if exclude_id:
+                    params["id"] = f"neq.{exclude_id}"
+                r = await cl.get(f"{sb}/rest/v1/reports",
+                                 headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                                 params=params)
+                if r.status_code == 200:
+                    for row in r.json():
+                        if row["id"] not in seen:
+                            seen.add(row["id"])
+                            results.append(row)
+    except Exception as exc:
+        logger.warning("hospital search failed: %s", exc)
+    return results
+
+
+async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_id) -> None:
+    """Clear, hospital-first result. Hospital/refugio matches come FIRST ('ya
+    localizado'); 'se busca' sources are secondary/optional. Never invents a match —
+    every line comes from a real DB candidate."""
+    hosp_lines: list[str] = []
+    other_lines: list[str] = []
+    if name:
+        # 1) dedicated hospital/refugio recall (the priority answer)
+        hosp_cands = await _search_hospital_matches(name, exclude_id=report_id)
+        hosp_ranked = _dedup_candidates(_rank_candidates(name, age, hosp_cands, loc), limit=3)
+        hosp_lines = [_format_match_line(m) for m in hosp_ranked]
+        # 2) other ('se busca') sources, secondary
+        gen = await _search_existing_matches(name, kind, exclude_id=report_id)
+        gen = [c for c in gen if c.get("source") not in _HOSP_SOURCES]
+        other_ranked = _dedup_candidates(_rank_candidates(name, age, gen, loc), limit=3)
+        other_lines = [_format_match_line(m) for m in other_ranked]
+    parts: list[str] = []
+    if hosp_lines:
+        parts.append("✅ Puede que ya esté localizada. Posible coincidencia en hospital/refugio:\n"
+                     + "\n".join(hosp_lines)
+                     + "\nEl equipo Reúne VE lo verifica antes de confirmar.")
+    else:
+        parts.append("Por ahora *no aparece* en hospitales ni refugios de nuestra base.")
+    if other_lines:
+        parts.append("También hay reportes en otras búsquedas (sin confirmar):\n"
+                     + "\n".join(other_lines))
+    parts.append("Registré tu reporte y tu contacto. Te aviso apenas aparezca en un hospital o refugio.")
+    await _waha_send(phone, "\n\n".join(parts))
+
+
 async def _process_message(payload: dict, phone: str, app: Any) -> None:
     body = (payload.get("body") or "").strip()
     media_url = _extract_media_url(payload)
@@ -817,80 +934,71 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
                     "http://127.0.0.1:3000", "https://127.0.0.1:3000"):
             media_url = media_url.replace(pub, waha_host)
 
-    # B2: extract from the caption/text and create the report FIRST, so a photo
-    # in the SAME message attaches to it. Media is handled after, below.
-    extracted: dict = {}
-    reply = ""
+    # The LLM is used ONLY to extract fields into the running state (_collected).
+    # A deterministic form (below) decides what to ask and what to answer — we do
+    # NOT use the LLM's free-text reply (it looped, skipped phone, and invented
+    # "posible coincidencia" with no real match). Match claims come ONLY from the
+    # real search in _search_and_answer.
     if body:
-        result = await _llm_extract(phone, body)
-        reply = _sanitize_reply(result.get("reply", ""))  # outbound safety guard
-        extracted = result.get("extracted", {})
-        if reply:
-            _conv_state[phone].append({"role": "assistant", "content": reply})
+        await _llm_extract(phone, body)
+    st = _collected[phone]
+    name = (st.get("name") or "").strip()
+    kind = st.get("kind") or "missing"
+    loc = st.get("location")
+    desc = st.get("description")
 
-    name = (extracted.get("name") or "").strip()
-    kind = extracted.get("kind") or "missing"
-    loc = extracted.get("location")
-    desc = extracted.get("description")
+    # A report with no name is still registrable when there's a photo, or it's a
+    # found person with details — matching then leans on face + location + cédula.
+    unident = (not name) and (has_media or (kind == "found" and bool(loc or desc)))
+    effective_name = name or (_UNIDENTIFIED if unident else "")
 
-    # P0-a: a FOUND person may be UNIDENTIFIED (no name) — rescuer/hospital
-    # reporting an unconscious person. Register with a placeholder; matching then
-    # relies on photo + location, not name. This is the highest-value case.
-    found_unident = (extracted.get("kind") == "found") and (not name) and bool(loc or desc)
-    effective_name = name or (_UNIDENTIFIED if found_unident else "")
-
-    # Register / update the report. P0-b: per-report key (unique per person), so a
-    # phone reporting several relatives never overwrites a prior one.
     report_id = None
-    if extracted.get("kind") and (name or found_unident):
+    if name or unident:
         conv_key = _report_key(phone)
-        upsert_data = {**extracted, "name": effective_name}
+        upsert_data = {**st, "kind": kind, "name": effective_name}
         report_id = await _upsert_report(phone, upsert_data, conv_key)
         if report_id:
             logger.info("Report upserted from WAHA: %s (phone=%s)", report_id, _hp(phone))
             await _register_subscriber(report_id, phone, upsert_data)
             asyncio.create_task(embed_and_match_report(report_id, {
-                "full_name": effective_name,
-                "age": extracted.get("age"),
-                "last_seen_location": loc,
-                "distinguishing_marks": desc,
-                "kind": kind,
+                "full_name": effective_name, "age": st.get("age"),
+                "last_seen_location": loc, "distinguishing_marks": desc, "kind": kind,
             }, app))
 
-    # B2: handle any photo now that the report (if any) exists, so a lead-with-photo
-    # message attaches the image to the report just created from its caption.
+    # Photo: attach + run face search (sends its own face-result message).
     if has_media:
         await _handle_photo(phone, media_url, report_id, app, bool(body))
         if not body:
+            # The photo prompt asks for name/details; record it so a following
+            # "no sé" skips name instead of re-asking.
+            if not name:
+                _asked[phone] = "name"
             return
 
-    # Name search only for REAL names. An unidentified found person can't be
-    # text-searched usefully; it relies on the face + background cross-match.
-    have_enough = bool(name) and bool(loc or extracted.get("age"))
-    if have_enough and phone not in _searched_shown:
-        _searched_shown.add(phone)
-        if reply:
-            await _waha_send(phone, reply)
-        candidates = await _search_existing_matches(name, kind, exclude_id=report_id)
-        ranked = _rank_candidates(name, extracted.get("age"), candidates, extracted.get("location"))
-        unique = _dedup_candidates(ranked, limit=3)
-        if unique:
-            await _waha_send(
-                phone,
-                "Busqué en nuestra base y hay posibles coincidencias:\n"
-                + "\n".join(_format_match_line(m) for m in unique)
-                + "\nSon preliminares — el equipo Reúne VE los verificará."
-            )
-        else:
-            await _waha_send(
-                phone,
-                "Busqué en nuestra base y no hay coincidencias claras aún. "
-                "Tu reporte queda activo — te avisamos si algo aparece."
-            )
+    # --- Deterministic form: ask the next missing field, NEVER the same twice ---
+    # If the user answered the field we just asked but it stayed empty (a "no sé"
+    # or a non-answer), mark it skipped so we advance instead of re-asking it.
+    prev = _asked.get(phone)
+    if body and prev and not _field_ok(phone, st, prev, kind, has_media):
+        _skipped[phone].add(prev)
+
+    nxt = _next_field(phone, st, kind, has_media)
+    if nxt:
+        _asked[phone] = nxt
+        # Keep the question in history so the next extraction maps the answer to
+        # the right field (e.g. "53" after "¿edad?" → age).
+        _conv_state[phone].append({"role": "assistant", "content": _FORM_Q[nxt]})
+        await _waha_send(phone, _FORM_Q[nxt])
         return
 
-    if reply:
-        await _waha_send(phone, reply)
+    # Form complete → search ONCE and answer clearly (hospital/refugio first).
+    if phone not in _searched_shown:
+        _searched_shown.add(phone)
+        await _search_and_answer(phone, name, kind, st.get("age"), loc, report_id)
+    elif body:
+        await _waha_send(
+            phone,
+            "Tu reporte ya está registrado. Te aviso apenas aparezca en un hospital o refugio.")
 
 
 @router.post("/webhook/waha")
