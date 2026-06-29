@@ -18,9 +18,38 @@ services:
       - /root/reconexion_images:/root/reconexion_images:ro
       - /root/venezreporta_images:/root/venezreporta_images:ro
       - app_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
     networks:
       - default
       - reune_waha
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Postgres local — estado conversacional del bot (FASE 0).
+  # NO es Supabase: aquí vive el hot-path por-mensaje (conversaciones, mensajes,
+  # eventos, clientes, flow_nodes, bot_config) para sacar ese tráfico de Supabase
+  # y darle durabilidad ante reinicios vía el named volume pg_data.
+  # Supabase sigue recibiendo SOLO las salidas compartidas (reports, matches...).
+  # ──────────────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: reune-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reune}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reune}
+      POSTGRES_DB: ${POSTGRES_DB:-reune}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/pg_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reune} -d ${POSTGRES_DB:-reune}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - default
 
   waha:
     image: devlikeapro/waha:latest
@@ -38,6 +67,7 @@ volumes:
   huggingface_cache:
   app_data:
   waha_data:
+  pg_data:        # FASE 0 — estado conversacional durable (sobrevive reinicios)
 
 networks:
   reune_waha:
