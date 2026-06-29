@@ -1,8 +1,19 @@
 # Arquitectura - Reune VE
 
-**Version:** 1.2
-**Fecha:** 2026-06-27
+**Version:** 2.0
+**Fecha:** 2026-06-29
 **Estado:** Producción
+
+> **ACTUALIZACIÓN 2026-06-29 (corrige drift).** El canal primario es **WAHA WhatsApp + Groq**,
+> NO Base44. Base44 fue **removido** del proyecto. El bot WAHA (`waha_intake.py`) SÍ está montado
+> en `main.py` y es el único canal en producción. El contenedor se llama **`reune-ve-api`**.
+> Cambios recientes: (1) **cadena de fallback LLM** (`llm_client.py`: Groq → Cerebras gpt-oss-120b →
+> OpenRouter) ante el rate-limit de Groq; (2) **vista `canonical_reports`** (base deduplicada,
+> migración 014); (3) **dashboard de aprobación humana** (`/admin/dashboard`, túnel SSH); (4) scraper
+> **`hospital_consolidado`** (xlsx maestro de pacientes hospital/refugio, con cédula → exact match).
+> El esquema vivo está en **`DATA-MODEL.md`**; las migraciones drifted, ver
+> `migrations/000_current_schema_reference.sql`. Las secciones abajo pueden contener detalles
+> históricos (Base44) que ya no aplican.
 
 ---
 
@@ -10,11 +21,11 @@
 
 Reune VE es el módulo de reunificación de personas de la plataforma de respuesta al sismo Venezuela 2026. Mientras Crisis VE atiende la evaluación de daños estructurales y el registro de sobrevivientes, Reune VE resuelve el problema de las personas desaparecidas: correlaciona reportes de "busco a X" con reportes de "encontré a X" provenientes de múltiples fuentes (Base44 Superagent, redes sociales, hospitales, organizaciones de ayuda) usando embeddings de texto y reconocimiento facial.
 
-El sistema opera en un solo contenedor Docker (`crisis-ve`) con `mem_limit: 256m` sobre un VPS DigitalOcean. **Advertencia:** los modelos ML en reposo consumen ~620 MB (InsightFace ~200 MB + SentenceTransformer ~420 MB), lo que excede el límite declarado en `docker-compose.yml`. Esta contradicción debe resolverse: o bien el límite se eleva en el compose del droplet de producción, o los modelos no pueden cargarse simultáneamente bajo esa configuración. Ver Sección 7.
+El sistema opera en un solo contenedor Docker (`reune-ve-api`, puerto 8080) sobre un VPS. **Advertencia:** los modelos ML en reposo consumen ~620 MB (InsightFace ~200 MB + SentenceTransformer ~420 MB), lo que excede el límite declarado en `docker-compose.yml`. Esta contradicción debe resolverse: o bien el límite se eleva en el compose del droplet de producción, o los modelos no pueden cargarse simultáneamente bajo esa configuración. Ver Sección 7.
 
 No hay microservicios separados: todo el pipeline de ML, los scrapers, el canal conversacional y los consumidores de webhooks corren dentro del mismo proceso Python gestionados por APScheduler y asyncio.
 
-El transporte primario activo es **Base44 Superagent** (webhook + polling). El bot WAHA con máquina de estados (`api/bot/webhook_router.py`, `flows.py`, `sessions.py`) existe en el código pero no está registrado en `main.py` y no está activo en producción.
+El transporte primario y único en producción es **WAHA WhatsApp** (`waha_intake.py`, webhook `POST /webhook/waha`, firma HMAC `X-Webhook-Hmac` sha512) con **Groq** (llama-3.3-70b) para la extracción conversacional, respaldado por la cadena de fallback de `llm_client.py`. Base44 Superagent fue removido. El código histórico `api/bot/*` está deprecado y no se ejecuta.
 
 ### Filosofía de diseño
 
@@ -24,7 +35,7 @@ El transporte primario activo es **Base44 Superagent** (webhook + polling). El b
 
 3. **ML en CPU, sin GPU.** InsightFace buffalo_sc y SentenceTransformer corren en CPU. La precisión es suficiente para el caso de uso; el costo de GPU en producción no está justificado para el volumen de crisis.
 
-4. **Ingesta por múltiples canales, esquema unificado.** Base44 Superagent (canal activo), WAHA/BotState (canal sin cablear), y scrapers autónomos convergen todos en la tabla `reports`. El canal de origen queda registrado en `source` pero el algoritmo de matching es canal-agnóstico.
+4. **Ingesta por múltiples canales, esquema unificado.** WAHA WhatsApp (canal conversacional activo), ~13 scrapers autónomos (incluido `hospital_consolidado`, el xlsx maestro de hospitales/refugios) y el panel LLM (`llm_leads`, con aprobación humana) convergen todos en la tabla `reports`. El canal de origen queda en `source` y el matching es canal-agnóstico.
 
 ---
 

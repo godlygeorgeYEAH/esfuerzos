@@ -17,7 +17,6 @@ scrapers). Extraction uses the existing Groq/OpenAI-compatible LLM config.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -26,15 +25,11 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import get_settings
+from llm_client import chat_json
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-_LLM_URL = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
-_LLM_HEADERS = {
-    "Authorization": f"Bearer {settings.llm_api_key}",
-    "Content-Type": "application/json",
-}
 _UA = {"User-Agent": "Mozilla/5.0 (compatible; ReuneVE-LLM/1.0)"}
 _MAX_CHARS = 12000          # cap content sent to the LLM
 _MIN_CONFIDENCE = 0.6
@@ -77,15 +72,9 @@ async def _llm_extract_persons(content: str) -> list[dict]:
         {"role": "system", "content": _EXTRACT_PROMPT},
         {"role": "user", "content": content},
     ]
-    async with httpx.AsyncClient(timeout=30) as cl:
-        r = await cl.post(_LLM_URL, headers=_LLM_HEADERS, json={
-            "model": settings.llm_model, "messages": messages,
-            "temperature": 0.1, "max_tokens": 1500,
-            "response_format": {"type": "json_object"},
-        })
-        r.raise_for_status()
-        data = json.loads(r.json()["choices"][0]["message"]["content"])
-        return data.get("persons") or []
+    # Goes through the provider fallback chain (Groq → fallbacks) with retry.
+    data = await chat_json(messages, temperature=0.1, max_tokens=1500, timeout=30)
+    return data.get("persons") or []
 
 
 def _sb_headers(prefer: str = "return=minimal") -> dict:
