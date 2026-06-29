@@ -394,23 +394,80 @@ async def admin_match_review(
     payload = {"status": decision, "reviewer": "dashboard",
                "reviewed_at": datetime.now(timezone.utc).isoformat()}
     async with httpx.AsyncClient(timeout=15) as cl:
+        # Always fetch both sides upfront: needed for the audit log and for
+        # the 'found' branch that must resolve missing_id server-side.
+        mr = await cl.get(f"{sb}/rest/v1/matches", headers=read_hdr,
+                          params={"id": f"eq.{match_id}",
+                                  "select": "missing_id,found_id", "limit": "1"})
+        match_rows = mr.json() if mr.status_code == 200 else []
+        if not match_rows:
+            raise HTTPException(status_code=404, detail="match not found")
+        missing_id = match_rows[0].get("missing_id")
+        found_id = match_rows[0].get("found_id")
+
         if decision == "found":
-            # Resolve the searched (missing) side from the match itself rather
-            # than trusting the client, then mark that person located.
-            mr = await cl.get(f"{sb}/rest/v1/matches", headers=read_hdr,
-                              params={"id": f"eq.{match_id}", "select": "missing_id", "limit": "1"})
-            rows = mr.json() if mr.status_code == 200 else []
-            missing_id = rows[0]["missing_id"] if rows else None
             if not missing_id:
-                raise HTTPException(status_code=404, detail="match not found")
+                raise HTTPException(status_code=404, detail="match missing_id not found")
             await cl.patch(f"{sb}/rest/v1/reports", headers=write_hdr,
                            params={"id": f"eq.{missing_id}"},
                            json={"person_state": "found"})
+
         resp = await cl.patch(f"{sb}/rest/v1/matches", headers=write_hdr,
                               params={"id": f"eq.{match_id}"},
                               json=payload)
         ok = resp.status_code in (200, 204)
+
+        # Write audit log entry — best-effort, never fails the review itself.
+        try:
+            rep_ids = [i for i in (missing_id, found_id) if i]
+            reps: dict = {}
+            if rep_ids:
+                rr = await cl.get(f"{sb}/rest/v1/reports", headers=read_hdr,
+                                  params={"select": "id,full_name,source",
+                                          "id": f"in.({','.join(rep_ids)})"})
+                if rr.status_code == 200:
+                    for x in rr.json():
+                        reps[x["id"]] = x
+            log_row = {
+                "match_id": match_id,
+                "decision": decision,
+                "missing_name": reps.get(missing_id, {}).get("full_name"),
+                "found_name": reps.get(found_id, {}).get("full_name"),
+                "missing_source": reps.get(missing_id, {}).get("source"),
+                "found_source": reps.get(found_id, {}).get("source"),
+            }
+            log_hdr = {**write_hdr, "Prefer": "return=minimal"}
+            await cl.post(f"{sb}/rest/v1/match_review_log", headers=log_hdr, json=log_row)
+        except Exception as exc:
+            logger.warning("review log write failed: %s", exc)
+
     return {"ok": ok, "match_id": match_id, "status": decision}
+
+
+@app.get("/admin/review-log")
+async def admin_review_log(
+    limit: int = 30,
+    offset: int = 0,
+    x_admin_key: str = Header(default=""),
+):
+    """Paginated audit log of human review decisions, newest first."""
+    _check_admin(x_admin_key)
+    sb = settings.supabase_url.rstrip("/")
+    k = settings.supabase_service_role_key
+    hdr = {"apikey": k, "Authorization": f"Bearer {k}", "Prefer": "count=exact"}
+    async with httpx.AsyncClient(timeout=15) as cl:
+        r = await cl.get(f"{sb}/rest/v1/match_review_log", headers=hdr,
+                         params={"select": "*", "order": "reviewed_at.desc",
+                                 "limit": str(limit), "offset": str(offset)})
+    rows = r.json() if r.status_code == 200 else []
+    total: int | None = None
+    cr = r.headers.get("content-range", "")
+    if "/" in cr:
+        try:
+            total = int(cr.split("/")[1])
+        except ValueError:
+            pass
+    return {"ok": True, "log": rows, "total": total, "limit": limit, "offset": offset}
 
 
 # Approval dashboard (human review UI). Served from FastAPI behind the firewall;
