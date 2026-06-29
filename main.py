@@ -278,7 +278,7 @@ async def admin_llm_approve(lead_id: str, x_admin_key: str = Header(default=""))
 # reunification lead (the person was physically located), not another "se busca".
 _HOSPITAL_SOURCES = {
     "hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
-    "google_drive_hospital", "hospitales_ve",
+    "google_drive_hospital", "hospitales_ve", "localizave",
 }
 
 

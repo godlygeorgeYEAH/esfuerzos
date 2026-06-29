@@ -99,7 +99,7 @@ _SKIP_WORDS = {"no", "no se", "no lo se", "nose", "ninguno", "ninguna", "no teng
 # Hospital/shelter sources: a candidate from one of these means "ya localizado" —
 # shown FIRST. Keep in sync with main._HOSPITAL_SOURCES.
 _HOSP_SOURCES = {"hospital_consolidado", "hospitales_26jun", "pacientes_terremoto",
-                 "google_drive_hospital", "hospitales_ve"}
+                 "google_drive_hospital", "hospitales_ve", "localizave"}
 
 # Greeting / restart: a returning user must start a CLEAN form, not resume a stale
 # one. A bare greeting or a "nuevo" intent resets the form and welcomes.

@@ -23,6 +23,7 @@ from scrapers.sos_laguaira import SosLaGuairaScraper
 from scrapers.pacientes_terremoto import PacientesTerremotoVZLAScraper
 from scrapers.hospital_consolidado import HospitalConsolidadoScraper
 from scrapers.desaparecidos_venezuela import DesaparecidosVenezuelaScraper
+from scrapers.localizave import LocalizaveScraper
 from scrapers.tuayudave import TuAyudaVEScraper
 
 logger = logging.getLogger("orchestrator")
@@ -49,6 +50,7 @@ def _make_scrapers() -> dict:
         "tuayudave": TuAyudaVEScraper(sb_url, sb_key),
         "hospital_consolidado": HospitalConsolidadoScraper(),
         "desaparecidos_venezuela": DesaparecidosVenezuelaScraper(),
+        "localizave": LocalizaveScraper(),
     }
 
     # Optional scrapers (require API keys)
