@@ -84,9 +84,10 @@ _searched_shown: set[str] = set()
 # and what to answer. Match claims come ONLY from the real search, never the LLM.
 _skipped: dict[str, set] = defaultdict(set)   # fields the user couldn't answer ("no sé")
 _asked: dict[str, str] = {}                   # the field we asked last turn (per phone)
-_FORM_ASK = ["name", "age", "location", "description", "contact"]
+_FORM_ASK = ["name", "cedula", "age", "location", "description", "contact"]
 _FORM_Q = {
     "name": "¿Cuál es el nombre completo de la persona? Si no lo sabes, escribe *no sé*.",
+    "cedula": "¿Tienes su *cédula* o documento de identidad? Es lo que más ayuda a localizarla en hospitales y refugios. (si no, escribe *no sé*)",
     "age": "¿Qué edad tiene aproximadamente? (si no sabes, *no sé*)",
     "location": "¿Dónde la viste por última vez, o dónde la encontraron? Zona, hospital o refugio. (si no sabes, *no sé*)",
     "description": "¿Alguna seña, ropa o detalle que la distinga? También puedes enviar una *foto*. (si no, *no sé*)",
@@ -248,6 +249,10 @@ def _resolve_source_url(source: str, source_url: str | None) -> str | None:
     """Turn a stored source_url into a real, openable URL when we know how."""
     if not source_url:
         return None
+    # sos_venezuela stores per-person detail URLs that 404 (only the site root
+    # works). Don't hand a family a broken link — point to the searchable root.
+    if source == "sos_venezuela":
+        return "https://sosvenezuela2026.com"
     if source_url.startswith("http"):
         return source_url
     # source_url is "<scheme>:<id>" for several scrapers
@@ -473,20 +478,22 @@ FLUJO DE CONVERSACIÓN (crítico):
 Cuando el usuario reporte una persona, extrae estos campos:
   kind: "missing" (busca a alguien) | "found" (encontró a alguien)
   name: nombre completo (incluye TODOS los apellidos que mencione)
+  cedula: número de cédula o documento de identidad (SOLO los dígitos, sin V- ni puntos). Es el dato más valioso para encontrar a la persona. Captúralo si lo menciona en cualquier momento.
   age: edad aproximada (solo el número)
   gender: "F" (femenino) | "M" (masculino) | null si no se sabe. Infiere del nombre/pronombres si es claro (ej. "a ella", "mi hija" → F).
   location: último lugar visto / lugar donde fue encontrado
   description: marcas, ropa, características
   contact: teléfono o forma de contacto del reportante
 
-Si falta información, pídela de forma natural. Cuando tengas al menos `kind` y `name`, confirma el reporte.
+Extrae TODOS los campos que el usuario mencione en su mensaje, aunque no se los hayas preguntado (entiende lenguaje natural: "mi hijo Pedro de 5 años, cédula 12345678" → name=Pedro, age=5, cedula=12345678).
 
 Responde SIEMPRE en este JSON (no incluyas nada más):
 {
-  "reply": "<texto para WhatsApp, máx 200 chars>",
+  "reply": "",
   "extracted": {
     "kind": null,
     "name": null,
+    "cedula": null,
     "age": null,
     "gender": null,
     "location": null,
@@ -509,9 +516,9 @@ def _sb_headers(key: str) -> dict:
 
 
 _FIELD_LABELS = {
-    "kind": "tipo (busca/encontró)", "name": "nombre", "age": "edad",
-    "gender": "género", "location": "ubicación", "description": "descripción",
-    "contact": "contacto",
+    "kind": "tipo (busca/encontró)", "name": "nombre", "cedula": "cédula",
+    "age": "edad", "gender": "género", "location": "ubicación",
+    "description": "descripción", "contact": "contacto",
 }
 
 
@@ -672,6 +679,13 @@ async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
         age_int = int(str(age_raw).strip()) if age_raw else None
     except (ValueError, TypeError):
         age_int = None
+    # Put the cédula into distinguishing_marks as "CI: <digits>" so the continuous
+    # run_cedula_exact_match (regex CI[:\s]+\d{5,10}) connects this report to a
+    # hospital/shelter record with the same national ID — the strongest match.
+    marks = (data.get("description") or "").strip()
+    cedula = re.sub(r"\D", "", str(data.get("cedula") or ""))
+    if 5 <= len(cedula) <= 10:
+        marks = f"CI: {cedula}" + (f" | {marks}" if marks else "")
     row = {
         "source": "waha_whatsapp",
         "source_url": f"waha:{conv_key}",
@@ -679,7 +693,7 @@ async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
         "full_name": (data.get("name") or "").strip(),
         "age": age_int,
         "last_seen_location": data.get("location"),
-        "distinguishing_marks": data.get("description"),
+        "distinguishing_marks": marks or None,
     }
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
