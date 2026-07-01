@@ -1,0 +1,35 @@
+name: VPS health check
+
+# Sondea /health del servicio en el VPS (sin reconstruir ni reiniciar nada).
+on:
+  push:
+    branches:
+      - claude/vps-deployment-setup-7g27ty
+    paths:
+      - health.trigger
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    env:
+      SSHPASS: ${{ secrets.VPS_SSH_PASSWORD }}
+      SSH_HOST: '13.140.166.72'
+      SSH_USER: 'root'
+    steps:
+      - name: Instalar sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+      - name: Sondear /health
+        run: |
+          echo "::add-mask::$SSHPASS"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=60 \
+            "${SSH_USER}@${SSH_HOST}" \
+            'ok=0; for i in $(seq 1 36); do code=$(curl -s -o /dev/null -m 10 -w "%{http_code}" http://localhost:8080/health || echo 000); echo "intento $i -> HTTP $code"; if [ "$code" = "200" ]; then ok=1; break; fi; sleep 5; done; echo "--- respuesta /health ---"; curl -s -m 10 http://localhost:8080/health || true; echo; echo "--- docker ps ---"; docker ps --filter name=reune-ve-api; if [ "$ok" != "1" ]; then echo "=== ULTIMOS LOGS ==="; docker logs --tail 60 reune-ve-api 2>&1 || true; exit 1; fi; echo "OK: /health respondio 200"'
+
+      - name: Inspeccionar intake de Telegram
+        run: |
+          echo "::add-mask::$SSHPASS"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=60 \
+            "${SSH_USER}@${SSH_HOST}" \
+            'echo "=== up desde ==="; docker ps --filter name=reune-ve-api --format "{{.Status}}"; echo "=== lineas relevantes de intake/telegram (ultimos 20m) ==="; docker logs --since 20m reune-ve-api 2>&1 | grep -iE "telegram|intake|polling|getupdates|application started|started application|bot|token|webhook" | tail -40; echo "=== errores / tracebacks (ultimos 20m) ==="; docker logs --since 20m reune-ve-api 2>&1 | grep -iE "error|traceback|exception|conflict|unauthorized|failed" | tail -40; echo "=== cola de arranque (tail 40) ==="; docker logs --tail 40 reune-ve-api 2>&1'

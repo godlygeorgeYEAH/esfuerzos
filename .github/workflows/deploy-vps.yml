@@ -1,0 +1,65 @@
+name: Deploy Reune VE API to VPS
+
+# Despliegue al VPS por SSH desde /root/esfuerzos (repo git):
+#   git pull origin main -> docker compose build reune-api -> up -d -> health check.
+#
+# Triggers:
+#  1. push tocando `deploy.trigger` en esta rama (lo usa el asistente).
+#  2. workflow_dispatch manual desde la UI de GitHub (requiere estar en main).
+#
+# La clave SSH se lee del secret cifrado VPS_SSH_PASSWORD (nunca en el repo).
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_host:
+        description: 'Host/IP del VPS (opcional)'
+        required: false
+        default: '13.140.166.72'
+      ssh_user:
+        description: 'Usuario SSH (opcional)'
+        required: false
+        default: 'root'
+      ssh_password:
+        description: 'Clave SSH (opcional; si se omite usa el secret VPS_SSH_PASSWORD)'
+        required: false
+      deploy_path:
+        description: 'Directorio de despliegue en el VPS (opcional)'
+        required: false
+        default: '/root/esfuerzos'
+      service:
+        description: 'Nombre del servicio de compose a construir (opcional)'
+        required: false
+        default: 'reune-api'
+  push:
+    branches:
+      - claude/vps-deployment-setup-7g27ty
+    paths:
+      - deploy.trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSHPASS: ${{ inputs.ssh_password || secrets.VPS_SSH_PASSWORD }}
+      SSH_HOST: ${{ inputs.ssh_host || '13.140.166.72' }}
+      SSH_USER: ${{ inputs.ssh_user || 'root' }}
+      DEPLOY_PATH: ${{ inputs.deploy_path || '/root/esfuerzos' }}
+      SERVICE: ${{ inputs.service || 'reune-api' }}
+    steps:
+      - name: Verificar credencial
+        run: |
+          if [ -z "$SSHPASS" ]; then
+            echo "::error::No hay clave SSH. Define el secret VPS_SSH_PASSWORD (Settings -> Secrets and variables -> Actions) o pásala como input."
+            exit 1
+          fi
+
+      - name: Instalar sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Desplegar por SSH
+        run: |
+          echo "::add-mask::$SSHPASS"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=60 -o TCPKeepAlive=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "set -e; cd '${DEPLOY_PATH}'; echo '===== GIT PULL ====='; git pull origin main; if command -v docker-compose >/dev/null 2>&1; then DC='docker-compose'; elif docker compose version >/dev/null 2>&1; then DC='docker compose'; else echo 'ERROR: no docker compose ni docker-compose'; exit 1; fi; echo \"===== DOCKER BUILD (${SERVICE}) via \$DC =====\"; \$DC build '${SERVICE}'; echo '===== RECREAR CONTENEDOR (evita bug ContainerConfig de compose v1) ====='; \$DC rm -sf '${SERVICE}' 2>/dev/null || true; docker rm -f reune-ve-api 2>/dev/null || true; echo '===== DOCKER UP ====='; \$DC up -d; echo '===== ESTADO ====='; \$DC ps; echo '===== HEALTH CHECK ====='; sleep 8; curl -s -m 20 -w '\nHTTP_CODE:%{http_code}\n' http://localhost:8080/health || echo 'curl fallo'"
