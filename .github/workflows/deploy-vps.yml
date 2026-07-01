@@ -1,0 +1,40 @@
+name: Deploy Reune VE API to VPS
+
+# Despliegue manual: se dispara a mano (o vía API) y hace SSH al VPS para
+# ejecutar git pull + docker compose build/up + health check.
+# La clave SSH se pasa como input en el momento del disparo.
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_host:
+        description: 'Host/IP del VPS'
+        required: true
+        default: '13.140.166.72'
+      ssh_user:
+        description: 'Usuario SSH'
+        required: true
+        default: 'root'
+      ssh_password:
+        description: 'Clave SSH del VPS'
+        required: true
+      deploy_path:
+        description: 'Directorio de despliegue en el VPS'
+        required: true
+        default: '/root/reune'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Desplegar por SSH
+        env:
+          SSHPASS: ${{ inputs.ssh_password }}
+          DEPLOY_PATH: ${{ inputs.deploy_path }}
+          SSH_TARGET: ${{ format('{0}@{1}', inputs.ssh_user, inputs.ssh_host) }}
+        run: |
+          echo "::add-mask::$SSHPASS"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 "$SSH_TARGET" \
+            "set -e; cd '$DEPLOY_PATH'; echo '===== GIT PULL ====='; git pull origin main; echo '===== DOCKER BUILD ====='; docker compose build reune-ve-api; echo '===== DOCKER UP ====='; docker compose up -d; echo '===== HEALTH CHECK ====='; sleep 3; curl -s -w '\nHTTP_CODE:%{http_code}\n' http://localhost:8080/health"
