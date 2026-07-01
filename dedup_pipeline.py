@@ -116,7 +116,10 @@ async def _fetch_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[d
 async def _fetch_cedula_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[dict]:
     """Only rows with a 'CI: <digits>' tag — a small slice of the table, so this
     scans the whole corpus in one pass instead of the 70k-row cap in
-    _fetch_reports (see run_dedup_pipeline's 'checked' count for that gap)."""
+    _fetch_reports (see run_dedup_pipeline's 'checked' count for that gap).
+    Ordered by id (indexed, cheap) rather than created_at — an ilike scan
+    combined with a created_at sort over the full table hit Postgres's
+    statement timeout in production (verified 2026-07-01)."""
     rows: list[dict] = []
     for page in range(_MAX_PAGES):
         r = await client.get(
@@ -128,7 +131,7 @@ async def _fetch_cedula_reports(client: httpx.AsyncClient, sb: str, key: str) ->
                 "distinguishing_marks": "ilike.*CI:*",
                 "limit": str(_PAGE_SIZE),
                 "offset": str(page * _PAGE_SIZE),
-                "order": "created_at.desc",
+                "order": "id.asc",
             },
         )
         r.raise_for_status()
@@ -269,21 +272,23 @@ async def run_dedup_pipeline(app: Any) -> dict:
     cedula_rows: list[dict] = []
     marked_this_run: set[str] = set()
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            sem = asyncio.Semaphore(_PATCH_CONCURRENCY)
+    async with httpx.AsyncClient(timeout=30) as client:
+        sem = asyncio.Semaphore(_PATCH_CONCURRENCY)
 
-            async def _do(dup: dict, canon: dict):
-                nonlocal marked, errors
-                async with sem:
-                    try:
-                        if await _mark_duplicate(client, sb, key, dup, canon, stamp):
-                            marked += 1
-                        marked_this_run.add(dup["id"])
-                    except Exception as exc:
-                        errors += 1
-                        logger.warning("dedup mark exception: %s", exc)
+        async def _do(dup: dict, canon: dict):
+            nonlocal marked, errors
+            async with sem:
+                try:
+                    if await _mark_duplicate(client, sb, key, dup, canon, stamp):
+                        marked += 1
+                    marked_this_run.add(dup["id"])
+                except Exception as exc:
+                    errors += 1
+                    logger.warning("dedup mark exception: %s", exc)
 
+        # Each pass is independently guarded — a failure in one (e.g. a
+        # Postgres statement timeout) must not skip the other.
+        try:
             cedula_rows = await _fetch_cedula_reports(client, sb, key)
             cedula_clusters = _cluster_by_cedula(cedula_rows)
             logger.info("dedup (cedula): %d rows scanned, %d duplicate clusters",
@@ -291,7 +296,11 @@ async def run_dedup_pipeline(app: Any) -> dict:
             cedula_tasks = [_do(dup, canon) for canon, dups in cedula_clusters for dup in dups]
             if cedula_tasks:
                 await asyncio.gather(*cedula_tasks)
+        except Exception as exc:
+            errors += 1
+            logger.error("run_dedup_pipeline (cedula pass) error: %s", exc)
 
+        try:
             rows = await _fetch_reports(client, sb, key)
             clusters = _cluster(rows)
             logger.info("dedup (name): %d rows scanned, %d duplicate clusters", len(rows), len(clusters))
@@ -301,9 +310,9 @@ async def run_dedup_pipeline(app: Any) -> dict:
             ]
             if name_tasks:
                 await asyncio.gather(*name_tasks)
-    except Exception as exc:
-        errors += 1
-        logger.error("run_dedup_pipeline error: %s", exc)
+        except Exception as exc:
+            errors += 1
+            logger.error("run_dedup_pipeline (name pass) error: %s", exc)
 
     result = {"checked": len(rows) + len(cedula_rows), "duplicates_marked": marked, "errors": errors}
     logger.info("dedup pipeline done: %s", result)
