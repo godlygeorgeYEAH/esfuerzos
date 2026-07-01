@@ -90,26 +90,30 @@ def _sb_headers(key: str, prefer: str = "") -> dict:
 
 
 async def _fetch_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[dict]:
-    """Paginate the whole reports table (PostgREST caps each request at ~1000)."""
+    """Paginate the whole reports table (PostgREST caps each request at ~1000).
+    Keyset (id > cursor) pagination, not OFFSET — verified 2026-07-01 that
+    OFFSET on this table hits Postgres's statement timeout past ~page 50
+    (143k rows: OFFSET forces a scan-and-discard of every prior row every
+    page, regardless of index). id is the primary key, so id > cursor uses
+    the index directly at any depth."""
     rows: list[dict] = []
-    for page in range(_MAX_PAGES):
-        offset = page * _PAGE_SIZE
-        r = await client.get(
-            f"{sb}/rest/v1/reports",
-            headers=_sb_headers(key),
-            params={
-                "select": "id,full_name,age,last_seen_location,kind,source_url,raw_data,created_at",
-                "full_name": "not.is.null",
-                "limit": str(_PAGE_SIZE),
-                "offset": str(offset),
-                "order": "created_at.desc",
-            },
-        )
+    last_id: str | None = None
+    for _ in range(_MAX_PAGES):
+        params = {
+            "select": "id,full_name,age,last_seen_location,kind,source_url,raw_data,created_at",
+            "full_name": "not.is.null",
+            "limit": str(_PAGE_SIZE),
+            "order": "id.asc",
+        }
+        if last_id:
+            params["id"] = f"gt.{last_id}"
+        r = await client.get(f"{sb}/rest/v1/reports", headers=_sb_headers(key), params=params)
         r.raise_for_status()
         batch = r.json() or []
         rows.extend(batch)
         if len(batch) < _PAGE_SIZE:
             break
+        last_id = batch[-1]["id"]
     return rows
 
 
@@ -117,28 +121,28 @@ async def _fetch_cedula_reports(client: httpx.AsyncClient, sb: str, key: str) ->
     """Only rows with a 'CI: <digits>' tag — a small slice of the table, so this
     scans the whole corpus in one pass instead of the 70k-row cap in
     _fetch_reports (see run_dedup_pipeline's 'checked' count for that gap).
-    Ordered by id (indexed, cheap) rather than created_at — an ilike scan
-    combined with a created_at sort over the full table hit Postgres's
-    statement timeout in production (verified 2026-07-01)."""
+    Keyset (id > cursor) pagination, same reasoning as _fetch_reports: OFFSET
+    on top of an ilike scan hit Postgres's statement timeout past page 1 in
+    production (verified 2026-07-01)."""
     rows: list[dict] = []
-    for page in range(_MAX_PAGES):
-        r = await client.get(
-            f"{sb}/rest/v1/reports",
-            headers=_sb_headers(key),
-            params={
-                "select": "id,kind,age,last_seen_location,distinguishing_marks,"
-                          "source_url,raw_data,created_at",
-                "distinguishing_marks": "ilike.*CI:*",
-                "limit": str(_PAGE_SIZE),
-                "offset": str(page * _PAGE_SIZE),
-                "order": "id.asc",
-            },
-        )
+    last_id: str | None = None
+    for _ in range(_MAX_PAGES):
+        params = {
+            "select": "id,kind,age,last_seen_location,distinguishing_marks,"
+                      "source_url,raw_data,created_at",
+            "distinguishing_marks": "ilike.*CI:*",
+            "limit": str(_PAGE_SIZE),
+            "order": "id.asc",
+        }
+        if last_id:
+            params["id"] = f"gt.{last_id}"
+        r = await client.get(f"{sb}/rest/v1/reports", headers=_sb_headers(key), params=params)
         r.raise_for_status()
         batch = r.json() or []
         rows.extend(batch)
         if len(batch) < _PAGE_SIZE:
             break
+        last_id = batch[-1]["id"]
     return rows
 
 
