@@ -25,12 +25,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from text_normalize import normalize_location, status_rank
+
+# 2026-07-01: cédula (national ID) is a much stronger dedup key than fuzzy name
+# matching — catches cases like the same hospital patient entered under three
+# misspelled name variants ("CARDENAS ALAXDIA" / "CARDONA ALEXANDRA" /
+# "CARDENAS ALEXNDRA") that never land in the same name-token bucket below.
+# Same regex as consolidation_pipeline._CEDULA_RE (kept local to avoid a
+# cross-module import for one line).
+_CEDULA_RE = re.compile(r'CI[:\s]+(\d{5,10})', re.IGNORECASE)
+
+
+def _extract_cedula(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = _CEDULA_RE.search(text)
+    return m.group(1) if m else None
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +111,63 @@ async def _fetch_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[d
         if len(batch) < _PAGE_SIZE:
             break
     return rows
+
+
+async def _fetch_cedula_reports(client: httpx.AsyncClient, sb: str, key: str) -> list[dict]:
+    """Only rows with a 'CI: <digits>' tag — a small slice of the table, so this
+    scans the whole corpus in one pass instead of the 70k-row cap in
+    _fetch_reports (see run_dedup_pipeline's 'checked' count for that gap)."""
+    rows: list[dict] = []
+    for page in range(_MAX_PAGES):
+        r = await client.get(
+            f"{sb}/rest/v1/reports",
+            headers=_sb_headers(key),
+            params={
+                "select": "id,kind,age,last_seen_location,distinguishing_marks,"
+                          "source_url,raw_data,created_at",
+                "distinguishing_marks": "ilike.*CI:*",
+                "limit": str(_PAGE_SIZE),
+                "offset": str(page * _PAGE_SIZE),
+                "order": "created_at.desc",
+            },
+        )
+        r.raise_for_status()
+        batch = r.json() or []
+        rows.extend(batch)
+        if len(batch) < _PAGE_SIZE:
+            break
+    return rows
+
+
+def _cluster_by_cedula(rows: list[dict]) -> list[tuple[dict, list[dict]]]:
+    """Group reports of the SAME kind sharing an exact cédula — e.g. the same
+    hospital patient entered on several spreadsheet snapshots under slightly
+    different spellings. Cross-kind (missing vs found) same-cédula pairs are a
+    real MATCH, not a duplicate — never merged here, that stays consolidation_
+    pipeline.run_cedula_exact_match's job."""
+    buckets: dict[str, list[dict]] = {}
+    for rec in rows:
+        cedula = _extract_cedula(rec.get("distinguishing_marks"))
+        if not cedula:
+            continue
+        bkey = f"{rec.get('kind','')}|{cedula}"
+        buckets.setdefault(bkey, []).append(rec)
+
+    clusters: list[tuple[dict, list[dict]]] = []
+    for members in buckets.values():
+        if len(members) < 2:
+            continue
+        canonical = max(
+            members,
+            key=lambda m: (
+                status_rank(m.get("kind"), m.get("distinguishing_marks")),
+                _completeness(m),
+                _neg_created(m),
+            ),
+        )
+        dups = [m for m in members if m["id"] != canonical["id"]]
+        clusters.append((canonical, dups))
+    return clusters
 
 
 def _cluster(rows: list[dict]) -> list[tuple[dict, list[dict]]]:
@@ -179,7 +252,11 @@ async def _mark_duplicate(
 
 
 async def run_dedup_pipeline(app: Any) -> dict:
-    """Scan recent reports, cluster near-duplicates, mark non-canonical rows."""
+    """Scan recent reports, cluster near-duplicates, mark non-canonical rows.
+    Two passes: cédula (exact, same-kind only) first since it is the stronger
+    signal and catches misspellings the name-token buckets miss; then the
+    existing fuzzy-name pass, skipping rows the cédula pass already marked
+    this run so the two don't fight over which canonical wins."""
     if not _HAS_RAPIDFUZZ:
         return {"checked": 0, "duplicates_marked": 0, "errors": 0, "skipped": "no rapidfuzz"}
 
@@ -189,13 +266,11 @@ async def run_dedup_pipeline(app: Any) -> dict:
     marked = 0
     errors = 0
     rows: list[dict] = []
+    cedula_rows: list[dict] = []
+    marked_this_run: set[str] = set()
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            rows = await _fetch_reports(client, sb, key)
-            clusters = _cluster(rows)
-            logger.info("dedup: %d rows scanned, %d duplicate clusters", len(rows), len(clusters))
-
             sem = asyncio.Semaphore(_PATCH_CONCURRENCY)
 
             async def _do(dup: dict, canon: dict):
@@ -204,17 +279,32 @@ async def run_dedup_pipeline(app: Any) -> dict:
                     try:
                         if await _mark_duplicate(client, sb, key, dup, canon, stamp):
                             marked += 1
+                        marked_this_run.add(dup["id"])
                     except Exception as exc:
                         errors += 1
                         logger.warning("dedup mark exception: %s", exc)
 
-            tasks = [_do(dup, canon) for canon, dups in clusters for dup in dups]
-            if tasks:
-                await asyncio.gather(*tasks)
+            cedula_rows = await _fetch_cedula_reports(client, sb, key)
+            cedula_clusters = _cluster_by_cedula(cedula_rows)
+            logger.info("dedup (cedula): %d rows scanned, %d duplicate clusters",
+                        len(cedula_rows), len(cedula_clusters))
+            cedula_tasks = [_do(dup, canon) for canon, dups in cedula_clusters for dup in dups]
+            if cedula_tasks:
+                await asyncio.gather(*cedula_tasks)
+
+            rows = await _fetch_reports(client, sb, key)
+            clusters = _cluster(rows)
+            logger.info("dedup (name): %d rows scanned, %d duplicate clusters", len(rows), len(clusters))
+            name_tasks = [
+                _do(dup, canon) for canon, dups in clusters for dup in dups
+                if dup["id"] not in marked_this_run
+            ]
+            if name_tasks:
+                await asyncio.gather(*name_tasks)
     except Exception as exc:
         errors += 1
         logger.error("run_dedup_pipeline error: %s", exc)
 
-    result = {"checked": len(rows), "duplicates_marked": marked, "errors": errors}
+    result = {"checked": len(rows) + len(cedula_rows), "duplicates_marked": marked, "errors": errors}
     logger.info("dedup pipeline done: %s", result)
     return result

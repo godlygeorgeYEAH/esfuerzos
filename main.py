@@ -237,6 +237,8 @@ async def admin_consolidate(
     phase=1: text embedding only
     phase=2: text cross-match only
     phase=3: face cross-match only
+    phase=4: cedula exact match only
+    phase=5: dedup pipeline (cedula-based + fuzzy-name clustering)
 
     Requires X-Admin-Key header. Admin is disabled if ADMIN_KEY is not set.
     Each phase is idempotent and safe to re-run.
@@ -255,6 +257,9 @@ async def admin_consolidate(
     elif phase == 4:
         background_tasks.add_task(run_cedula_exact_match, app)
         msg = "Phase 0: cedula exact match started"
+    elif phase == 5:
+        background_tasks.add_task(run_dedup_pipeline, app)
+        msg = "Phase 5: dedup pipeline started"
     else:
         background_tasks.add_task(run_full_consolidation, app)
         msg = "Full consolidation pipeline started (phases 1-3)"
@@ -328,7 +333,7 @@ async def admin_list_matches(
     hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
     params = {
         "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,"
-                  "created_at,family_ack,family_ack_at,family_ack_side",
+                  "created_at,family_ack,family_ack_at,family_ack_side,same_photo_suspected",
         "status": f"eq.{status}",
         "order": "combined_score.desc",
         "limit": "1000" if mode != "all" else "400",  # fetch wide, then filter/collapse
@@ -375,6 +380,11 @@ async def admin_list_matches(
             # A real match links DIFFERENT sources, not two entries on the same
             # board (same-source face=1.0 is usually a reused/placeholder photo).
             if miss.get("source") and miss.get("source") == found.get("source"):
+                continue
+            # Aggregators re-host each other's photos (verified 2026-07-01); a
+            # flagged pair is the same picture scraped twice, not corroboration
+            # — keep it out of the actionable queue (still visible in mode=all).
+            if m.get("same_photo_suspected"):
                 continue
         # One best (highest combined, already sorted) candidate per buscado.
         if m.get("missing_id") in seen_missing:

@@ -136,8 +136,10 @@ function card(m) {
   const familyBadge = m.family_ack === 'yes'
     ? '<span class="badge b-family">👨‍👩‍👧 familia confirmó</span>'
     : (m.family_ack === 'no' ? '<span class="badge b-family">👨‍👩‍👧 familia dijo que NO</span>' : '');
+  const samePhotoBadge = m.same_photo_suspected
+    ? '<span class="badge b-dead">⚠ posible misma foto re-hosteada (no es corroboración)</span>' : '';
   const scores = '<div class="scores">'
-    + familyBadge
+    + familyBadge + samePhotoBadge
     + (m.face_score > 0 ? `<span class="badge b-face">cara ${pct(m.face_score)}%</span>` : '')
     + (m.text_score > 0 ? `<span class="badge b-text">texto ${pct(m.text_score)}%</span>` : '')
     + `<span class="badge b-comb">combinado ${pct(m.combined_score)}%</span>`

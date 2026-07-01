@@ -770,13 +770,18 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
             mr = await cl.get(
                 f"{sb}/rest/v1/matches",
                 headers=hdr,
-                params={"id": f"eq.{match_id}", "select": "missing_id,found_id,face_score"},
+                params={"id": f"eq.{match_id}",
+                        "select": "missing_id,found_id,face_score,same_photo_suspected"},
             )
             if mr.status_code != 200 or not mr.json():
                 return {}
             row = mr.json()[0]
             if float(row.get("face_score") or 0) < _FACE_DISCLOSE_THRESHOLD:
                 return {}  # too weak to disclose inline; leave to human review
+            if row.get("same_photo_suspected"):
+                # Not independent corroboration — it's likely the same photo
+                # re-hosted by another aggregator, not a second sighting.
+                return {}
             other_id = row["found_id"] if row.get("missing_id") == source_report_id else row["missing_id"]
             if not other_id:
                 return {}
