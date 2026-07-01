@@ -184,10 +184,14 @@ def _same_photo_suspected(
     if not a_photo or not b_photo:
         return False
     for src_url, other_photo in ((a_source_url, b_photo), (b_source_url, a_photo)):
-        if src_url and ":" in src_url:
-            token = src_url.split(":", 1)[1]
-            if len(token) >= 8 and token in other_photo:
-                return True
+        # Not every source_url carries a "source:id" prefix (some reconexion
+        # rows store the bare id) — take the last colon-separated segment,
+        # which is the id either way. Some sources store a full URL as
+        # source_url instead of a synthetic key; excluding "/" keeps this to
+        # compact id tokens so a shared domain fragment can't false-positive.
+        token = (src_url or "").rsplit(":", 1)[-1]
+        if len(token) >= 8 and "/" not in token and token in other_photo:
+            return True
     for src_name, other_photo in ((a_source, b_photo), (b_source, a_photo)):
         for tok in _source_path_tokens(src_name):
             if f"/{tok}/" in other_photo:
