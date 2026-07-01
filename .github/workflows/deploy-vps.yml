@@ -1,14 +1,13 @@
 name: Deploy Reune VE API to VPS
 
-# Despliegue al VPS por SSH: git pull + docker compose build/up + health check.
+# Despliegue al VPS por SSH desde /root/esfuerzos (repo git):
+#   git pull origin main -> docker compose build reune-api -> up -d -> health check.
 #
-# Dos formas de disparar:
-#  1. push -> tocando el archivo `deploy.trigger` en esta rama (lo usa el asistente).
-#  2. workflow_dispatch -> manual desde la UI de GitHub (requiere estar en la rama
-#     por defecto). Los inputs son opcionales; si no se dan, usa el secret y los
-#     valores por defecto.
+# Triggers:
+#  1. push tocando `deploy.trigger` en esta rama (lo usa el asistente).
+#  2. workflow_dispatch manual desde la UI de GitHub (requiere estar en main).
 #
-# La clave SSH NUNCA va en el repo: se lee del secret cifrado VPS_SSH_PASSWORD.
+# La clave SSH se lee del secret cifrado VPS_SSH_PASSWORD (nunca en el repo).
 on:
   workflow_dispatch:
     inputs:
@@ -26,7 +25,11 @@ on:
       deploy_path:
         description: 'Directorio de despliegue en el VPS (opcional)'
         required: false
-        default: '/root/reune'
+        default: '/root/esfuerzos'
+      service:
+        description: 'Nombre del servicio de compose a construir (opcional)'
+        required: false
+        default: 'reune-api'
   push:
     branches:
       - claude/vps-deployment-setup-7g27ty
@@ -40,7 +43,8 @@ jobs:
       SSHPASS: ${{ inputs.ssh_password || secrets.VPS_SSH_PASSWORD }}
       SSH_HOST: ${{ inputs.ssh_host || '13.140.166.72' }}
       SSH_USER: ${{ inputs.ssh_user || 'root' }}
-      DEPLOY_PATH: ${{ inputs.deploy_path || '/root/reune' }}
+      DEPLOY_PATH: ${{ inputs.deploy_path || '/root/esfuerzos' }}
+      SERVICE: ${{ inputs.service || 'reune-api' }}
     steps:
       - name: Verificar credencial
         run: |
@@ -56,5 +60,5 @@ jobs:
         run: |
           echo "::add-mask::$SSHPASS"
           sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
-            "${SSH_USER}@${SSH_HOST}" \
-            "set -e; cd '${DEPLOY_PATH}'; echo '===== GIT PULL ====='; git pull origin main; echo '===== DOCKER BUILD ====='; docker compose build reune-ve-api; echo '===== DOCKER UP ====='; docker compose up -d; echo '===== HEALTH CHECK ====='; sleep 3; curl -s -w '\nHTTP_CODE:%{http_code}\n' http://localhost:8080/health"
+            "${SSH_USER}@${SSH_HOST}" SERVICE="${SERVICE}" DEPLOY_PATH="${DEPLOY_PATH}" \
+            'set -e; cd "$DEPLOY_PATH"; echo "===== GIT PULL ====="; git pull origin main; echo "===== DOCKER BUILD ($SERVICE) ====="; docker compose build "$SERVICE"; echo "===== DOCKER UP ====="; docker compose up -d; echo "===== HEALTH CHECK ====="; sleep 5; curl -s -m 20 -w "\nHTTP_CODE:%{http_code}\n" http://localhost:8080/health || echo "curl fallo"'
