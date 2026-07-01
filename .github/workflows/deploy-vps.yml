@@ -60,5 +60,5 @@ jobs:
         run: |
           echo "::add-mask::$SSHPASS"
           sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
-            "${SSH_USER}@${SSH_HOST}" SERVICE="${SERVICE}" DEPLOY_PATH="${DEPLOY_PATH}" \
-            'set -e; cd "$DEPLOY_PATH"; echo "===== GIT PULL ====="; git pull origin main; echo "===== DOCKER BUILD ($SERVICE) ====="; docker compose build "$SERVICE"; echo "===== DOCKER UP ====="; docker compose up -d; echo "===== HEALTH CHECK ====="; sleep 5; curl -s -m 20 -w "\nHTTP_CODE:%{http_code}\n" http://localhost:8080/health || echo "curl fallo"'
+            "${SSH_USER}@${SSH_HOST}" \
+            "set -e; cd '${DEPLOY_PATH}'; echo '===== GIT PULL ====='; git pull origin main; echo '===== DOCKER BUILD (${SERVICE}) ====='; docker compose build '${SERVICE}'; echo '===== DOCKER UP ====='; docker compose up -d; echo '===== HEALTH CHECK ====='; sleep 5; curl -s -m 20 -w '\nHTTP_CODE:%{http_code}\n' http://localhost:8080/health || echo 'curl fallo'"
