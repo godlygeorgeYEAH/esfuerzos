@@ -1,5 +1,36 @@
 # Next Actions — Reune VE
-**Updated:** 2026-06-27 (session 4)
+**Updated:** 2026-07-01 (session 5 — voice feedback / modo Buscar)
+
+---
+
+## NEW — Modo "Buscar" (voice feedback 2026-07-01, sin deploy aún)
+
+Feedback (2 audios) de alguien verificando fotos contra el sistema: el bot forzaba
+el formulario completo (nombre/edad/cédula/ubicación) por cada foto antes de decir
+si había coincidencia, y una foto ya matcheada la noche anterior volvía a pedir
+datos en vez de mostrar el match. Causa raíz confirmada en `_handle_photo`: sin
+`report_id` activo, pedía datos antes de intentar el match.
+
+**Implementado en `waha_intake.py` (NO desplegado a VPS):**
+- Saludo ahora muestra un menú: *1) Buscar* / *2) Registrar*.
+- Modo **Buscar**: cada foto o nombre/cédula se responde al toque, sin abrir el
+  formulario de intake. 100% de solo lectura — no crea filas en `reports`,
+  `photos` ni `matches`, así que las consultas casuales no ensucian el dashboard
+  admin ni los pipelines de dedup/consolidación. Mantiene el mismo filtro de
+  privacidad F7 (nunca revela un reporte de WhatsApp de otra familia).
+- Modo **Registrar**: el flujo de intake completo de siempre, sin cambios.
+- Sesiones existentes (sin `mode` guardado) caen por defecto en el flujo viejo —
+  compatible con conversaciones ya en curso al momento del deploy.
+
+**Antes de desplegar:**
+- [ ] Revisar el diff de `waha_intake.py` (`git diff`)
+- [ ] `git commit` + push a `esfuerzos` main, luego en el VPS: `git pull && docker compose build reune-ve-api && docker compose up -d`
+- [ ] Probar en el bot real:
+  - Enviar "hola" → debe mostrar el menú 1/2
+  - Elegir "1" → enviar una foto → debe responder match/no-match sin pedir nombre/edad/cédula
+  - Enviar una segunda foto de otra persona inmediatamente → debe responder de forma independiente (no debe arrastrar datos de la foto anterior)
+  - Elegir "2" (o cualquier otra respuesta) → debe comportarse exactamente como el flujo de registro de siempre
+  - `select count(*) from reports where source='waha_whatsapp' and created_at > now() - interval '1 hour';` tras varias búsquedas → debe seguir igual (0 filas nuevas por las búsquedas, solo por registros reales)
 
 ---
 

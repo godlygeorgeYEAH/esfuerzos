@@ -47,7 +47,13 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from config import get_settings
 from llm_client import LLMUnavailable, chat_json
 from consolidation_pipeline import embed_and_match_report
-from face_pipeline import process_photo_for_report
+from face_pipeline import (
+    FACE_MATCH_COUNT,
+    FACE_MATCH_THRESHOLD,
+    embed_photo_from_bytes,
+    embed_photo_from_url,
+    process_photo_for_report,
+)
 from scrapers.base import age_match_score
 from text_normalize import (
     deaccent as _deaccent_shared,
@@ -93,6 +99,21 @@ _asked: dict[str, str] = {}                   # the field we asked last turn (pe
 # _ACK_WINDOW_HOURS so an unrelated "no" days later isn't misread as an ack.
 _last_match: dict[str, dict] = {}
 _ACK_WINDOW_HOURS = 72
+
+# GP 2026-07-01 (voice feedback): a user checking a list of photos against the
+# DB was forced through the full name/cedula/age/location form for EACH photo
+# before ever seeing whether it matched. _mode splits "just checking" from
+# "filing a report": "buscar" skips the form entirely and answers per-message;
+# "cargar" is today's full intake, unchanged. Unset (legacy sessions) == cargar.
+_mode: dict[str, str] = {}
+_MENU = (
+    "👋 Hola, soy el asistente de *Reúne VE*.\n\n"
+    "¿Qué necesitas?\n"
+    "1️⃣ *Buscar* — enviar una foto o datos para verificar si la persona ya está en el sistema.\n"
+    "2️⃣ *Registrar* — reportar a alguien desaparecido o encontrado.\n\n"
+    "Responde *1* o *2*.")
+_BUSCAR_CHOICES = {"1", "buscar", "verificar", "consultar", "chequear"}
+_BUSCAR_PROMPT = "Envíame una *foto* o el *nombre/cédula* de la persona que quieres verificar."
 _FORM_ASK = ["name", "cedula", "age", "location", "description", "contact"]
 _FORM_Q = {
     "name": "¿Cuál es el nombre completo de la persona? Si no lo sabes, escribe *no sé*.",
@@ -194,6 +215,8 @@ async def _load_session(phone: str) -> None:
         _asked[phone] = st["asked"]
     if st.get("last_match"):
         _last_match[phone] = st["last_match"]
+    if st.get("mode"):
+        _mode[phone] = st["mode"]
 
 
 async def _save_session(phone: str) -> bool:
@@ -210,6 +233,7 @@ async def _save_session(phone: str) -> bool:
         "skipped": sorted(_skipped.get(phone, set())),
         "asked": _asked.get(phone),
         "last_match": _last_match.get(phone),
+        "mode": _mode.get(phone),
     }
     try:
         async with httpx.AsyncClient(timeout=6) as cl:
@@ -246,6 +270,7 @@ def _evict_memory(phone: str) -> None:
     _skipped.pop(phone, None)
     _asked.pop(phone, None)
     _last_match.pop(phone, None)
+    _mode.pop(phone, None)
 
 # Human-readable labels for each scraper source. Shown to families so a match
 # result reads "via Venezuela Reporta" instead of the raw "venezreporta" token.
@@ -1086,6 +1111,112 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
         await _waha_send(phone, "Recibí la foto. Para buscarla, dime el nombre o los datos de la persona.")
 
 
+async def _handle_buscar(phone: str, body: str, media_url: str, has_media: bool,
+                         app: Any, payload: dict) -> None:
+    """"Buscar" mode: a lightweight, read-only check — never the multi-turn
+    intake form. Each message (photo or name/cedula) is answered on its own;
+    nothing is written to reports/photos/matches, so casual verification never
+    creates ghost records for the admin review queue or the dedup pipeline."""
+    if has_media:
+        if not media_url:
+            await _waha_send(phone, "Recibí la foto pero no pude descargarla. ¿Puedes reenviarla?")
+            return
+        await _search_photo_readonly(phone, media_url, app, image_bytes=payload.get("_image_bytes"))
+        return
+    if body:
+        data = await _llm_extract(phone, body)
+        ext = data.get("extracted") or {}
+        name = (ext.get("name") or "").strip()
+        cedula = ext.get("cedula")
+        if name or cedula:
+            await _search_and_answer(phone, name, ext.get("kind") or "missing",
+                                     ext.get("age"), ext.get("location"), None,
+                                     cedula=cedula, note_registered=False)
+        else:
+            await _waha_send(phone, "Dime el nombre, la cédula, o envía una foto de la "
+                                    "persona que quieres verificar.")
+        return
+    await _waha_send(phone, _BUSCAR_PROMPT)
+
+
+async def _search_photo_readonly(phone: str, media_url: str, app: Any,
+                                 image_bytes: bytes | None = None) -> None:
+    """Embed the photo and search existing reports for a face match, WITHOUT
+    persisting anything (no photos/reports/matches rows) — see _handle_buscar.
+    Applies the same F7 privacy gate as the normal intake path (_lookup_match_details):
+    a private WhatsApp report from another family is never disclosed to a stranger."""
+    if image_bytes is not None:
+        result = await embed_photo_from_bytes(image_bytes, app.state.face_model)
+    else:
+        result = await embed_photo_from_url(media_url, app.state.face_model)
+    if result is None:
+        await _waha_send(phone, "No pude detectar un rostro claro en la foto. "
+                                "¿Puedes enviar otra más nítida?")
+        return
+
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
+    candidates: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=15) as cl:
+            for target_kind in ("missing", "found"):
+                r = await cl.post(
+                    f"{sb}/rest/v1/rpc/match_reports_by_face",
+                    headers={**hdr, "Content-Type": "application/json"},
+                    json={"query_embedding": result["embedding"], "query_kind": target_kind,
+                          "match_threshold": FACE_MATCH_THRESHOLD, "match_count": FACE_MATCH_COUNT},
+                )
+                if r.status_code == 200:
+                    candidates.extend(r.json())
+    except Exception as exc:
+        logger.warning("buscar photo search failed for %s: %s", _hp(phone), exc)
+    candidates.sort(key=lambda c: c.get("similarity", 0), reverse=True)
+
+    disclosed: dict = {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            for cand in candidates:
+                if float(cand.get("similarity") or 0) < _FACE_DISCLOSE_THRESHOLD:
+                    continue
+                rr = await cl.get(
+                    f"{sb}/rest/v1/reports", headers=hdr,
+                    params={"id": f"eq.{cand['report_id']}",
+                            "select": "full_name,last_seen_location,source,source_url"})
+                if rr.status_code != 200 or not rr.json():
+                    continue
+                rep = rr.json()[0]
+                if rep.get("source") == "waha_whatsapp":
+                    continue  # F7: never reveal a private WhatsApp report to a stranger
+                disclosed = {
+                    "name": rep.get("full_name") or "persona registrada",
+                    "location": rep.get("last_seen_location"),
+                    "source": rep.get("source"),
+                    "url": resolve_source_url(rep.get("source", ""), rep.get("source_url")),
+                }
+                break
+    except Exception as exc:
+        logger.warning("buscar photo disclose lookup failed for %s: %s", _hp(phone), exc)
+
+    if disclosed:
+        src_txt = f" (via {_source_label(disclosed['source'])})" if disclosed.get("source") else ""
+        url_txt = f"\n{disclosed['url']}" if disclosed.get("url") else ""
+        locp = (f", ubicación: *{disclosed['location']}*" if disclosed.get("location")
+                else ", ubicación por confirmar")
+        await _waha_send(
+            phone,
+            f"Analicé la foto. Hay una *posible* coincidencia: *{disclosed['name']}*{locp}{src_txt}.{url_txt}\n"
+            "Esto fue solo una verificación — no se registró ni notificó a nadie. Si quieres "
+            "reportarlo formalmente escribe *registrar*.")
+    elif candidates:
+        await _waha_send(
+            phone,
+            "Analicé la foto. Hay coincidencias en verificación pero sin datos suficientes para "
+            "mostrarte el detalle aquí. Si quieres reportarlo formalmente escribe *registrar*.")
+    else:
+        await _waha_send(phone, "Analicé la foto y por ahora no hay coincidencias en el sistema.")
+
+
 # Per-phone lock: webhook messages arrive as concurrent BackgroundTasks. Two quick
 # messages from the same number (e.g. name then location) would otherwise interleave
 # load→process→save→evict and clobber each other's in-flight fields. Serialize per
@@ -1132,6 +1263,7 @@ def _reset_form(phone: str) -> None:
     _skipped.pop(phone, None)
     _asked.pop(phone, None)
     _last_match.pop(phone, None)
+    _mode.pop(phone, None)
 
 
 def _field_ok(phone: str, st: dict, field: str, kind: str, has_media: bool) -> bool:
@@ -1224,7 +1356,7 @@ async def _search_hospital_matches(name: str, exclude_id: str | None = None) -> 
 
 
 async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_id,
-                             cedula: str | None = None) -> None:
+                             cedula: str | None = None, note_registered: bool = True) -> None:
     """Clear result, ordered like a human reviewer would rank confidence:
        1) EXACT cédula (same document) — strongest,
        2) name match in a hospital/refugio (with age gate + strict name),
@@ -1301,7 +1433,11 @@ async def _search_and_answer(phone: str, name: str, kind: str, age, loc, report_
     if reference_lines:
         parts.append("Otros reportes con datos parecidos (sin confirmar, solo referencia):\n"
                      + "\n".join(reference_lines))
-    parts.append("Registré tu reporte y tu contacto. Te aviso apenas aparezca en un hospital o refugio.")
+    if note_registered:
+        parts.append("Registré tu reporte y tu contacto. Te aviso apenas aparezca en un hospital o refugio.")
+    else:
+        parts.append("Esto fue solo una verificación — no se registró ningún reporte. Si quieres "
+                     "reportarlo formalmente escribe *registrar*.")
     await _waha_send(phone, "\n\n".join(parts))
 
 
@@ -1318,9 +1454,8 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
     body_norm = _deaccent_shared(body).strip()
     if body and not has_media and (body_norm in _GREETING or body_norm in _RESTART):
         _reset_form(phone)
-        _asked[phone] = "name"
-        _conv_state[phone].append({"role": "assistant", "content": _WELCOME})
-        await _waha_send(phone, _WELCOME)
+        _asked[phone] = "__menu__"
+        await _waha_send(phone, _MENU)
         return
 
     # Family self-ack: a bare "sí"/"no" replying to a just-disclosed match. Only
@@ -1350,6 +1485,31 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
         for pub in ("http://localhost:3000", "https://localhost:3000",
                     "http://127.0.0.1:3000", "https://127.0.0.1:3000"):
             media_url = media_url.replace(pub, waha_host)
+
+    # Pending menu choice from the greeting: route to "buscar" (lightweight,
+    # per-message checks) or "cargar" (today's full intake form). A photo sent
+    # in reply to the menu is treated as an implicit "buscar" — no need to
+    # type 1 first.
+    if _asked.get(phone) == "__menu__":
+        if has_media or body_norm in _BUSCAR_CHOICES:
+            _mode[phone] = "buscar"
+            _asked.pop(phone, None)
+            if has_media:
+                await _handle_buscar(phone, body, media_url, has_media, app, payload)
+            else:
+                await _waha_send(phone, _BUSCAR_PROMPT)
+            return
+        _mode[phone] = "cargar"
+        _asked[phone] = "name"
+        _conv_state[phone].append({"role": "assistant", "content": _WELCOME})
+        await _waha_send(phone, _WELCOME)
+        return
+
+    # "Buscar" mode: every message is an independent check, never a multi-turn
+    # form. Nothing here writes to reports/photos/matches (see _handle_buscar).
+    if _mode.get(phone) == "buscar":
+        await _handle_buscar(phone, body, media_url, has_media, app, payload)
+        return
 
     # The LLM is used ONLY to extract fields into the running state (_collected).
     # A deterministic form (below) decides what to ask and what to answer — we do
