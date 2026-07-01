@@ -60,5 +60,6 @@ jobs:
         run: |
           echo "::add-mask::$SSHPASS"
           sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
+            -o ServerAliveInterval=20 -o ServerAliveCountMax=60 -o TCPKeepAlive=yes \
             "${SSH_USER}@${SSH_HOST}" \
             "set -e; cd '${DEPLOY_PATH}'; echo '===== GIT PULL ====='; git pull origin main; if command -v docker-compose >/dev/null 2>&1; then DC='docker-compose'; elif docker compose version >/dev/null 2>&1; then DC='docker compose'; else echo 'ERROR: no docker compose ni docker-compose'; exit 1; fi; echo \"===== DOCKER BUILD (${SERVICE}) via \$DC =====\"; \$DC build '${SERVICE}'; echo '===== DOCKER UP ====='; \$DC up -d; echo '===== HEALTH CHECK ====='; sleep 5; curl -s -m 20 -w '\nHTTP_CODE:%{http_code}\n' http://localhost:8080/health || echo 'curl fallo'"
