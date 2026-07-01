@@ -23,6 +23,7 @@
   .b-face { background: #173a2a; color: #5be39b; } .b-text { background: #1d2f45; color: #7db4ff; }
   .b-comb { background: #3a3417; color: #e3cf5b; } .b-hosp { background: #3a1717; color: #ff8d8d; }
   .b-dead { background: #3a3a3a; color: #d7d7d7; } .marks { font-size: 12px; color: #9fb0c0; margin-top: 6px; font-style: italic; }
+  .b-family { background: #173a3a; color: #5be3d0; }
   .dead-note { background: #2a1414; border: 1px solid #5a2a2a; color: #ffb3b3; padding: 6px 10px; border-radius: 6px; font-size: 12px; margin-top: 8px; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; }
   .side { padding: 14px; border-right: 1px solid #2a313a; }
@@ -132,7 +133,11 @@ function card(m) {
   const el = document.createElement('div');
   el.className = 'card';
   el.dataset.id = m.id;
+  const familyBadge = m.family_ack === 'yes'
+    ? '<span class="badge b-family">👨‍👩‍👧 familia confirmó</span>'
+    : (m.family_ack === 'no' ? '<span class="badge b-family">👨‍👩‍👧 familia dijo que NO</span>' : '');
   const scores = '<div class="scores">'
+    + familyBadge
     + (m.face_score > 0 ? `<span class="badge b-face">cara ${pct(m.face_score)}%</span>` : '')
     + (m.text_score > 0 ? `<span class="badge b-text">texto ${pct(m.text_score)}%</span>` : '')
     + `<span class="badge b-comb">combinado ${pct(m.combined_score)}%</span>`

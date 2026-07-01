@@ -60,6 +60,9 @@ erDiagram
         text reviewer "quien aprobo (dashboard)"
         timestamptz reviewed_at
         bool notify_sent "el notifier ya aviso a la familia"
+        text family_ack "yes|no - la familia lo confirmo por chat (migration 017)"
+        timestamptz family_ack_at
+        text family_ack_side "missing|found - que lado respondio"
         timestamptz created_at
     }
     bot_subscribers {
@@ -114,7 +117,7 @@ erDiagram
 2. **Fotos** → `photos` (1:N con `reports`); embedding facial 512-dim; `quality_ok=true` si hay cara.
 3. **Dedup** → `dedup_pipeline` marca duplicados en `raw_data.possible_duplicate_of`. La vista `canonical_reports` expone solo los no-duplicados (~70.5k de ~82.7k).
 4. **Matching** → `consolidation_pipeline` (texto, pgvector) + `face_pipeline` (cara) + `run_cedula_exact_match` (CI exacta, la señal más fuerte) escriben pares en `matches` con `status='pending'`.
-5. **Revisión humana** → `/admin/dashboard` lista `matches` pending; aprobar setea `status='confirmed'` + `reviewer` + `reviewed_at`.
+5. **Revisión humana** → `/admin/dashboard` lista `matches` pending; aprobar setea `status='confirmed'` + `reviewer` + `reviewed_at`. La familia también puede auto-confirmar por chat (responde SI/NO a un match ya revelado) — eso solo escribe `family_ack` y sube el match al tope de la cola (`ORDER BY family_ack DESC`); nunca cambia `status` ni salta la revisión humana (ver `waha_intake._handle_family_ack`).
 6. **Notificación** → `notify_pipeline` (cada 10 min) toma `status='confirmed'` + `notify_sent=false` y avisa a `bot_subscribers` de ambos lados, marcando `notify_sent=true`.
 
 ## Índices y búsqueda vectorial

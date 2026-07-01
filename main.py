@@ -327,7 +327,8 @@ async def admin_list_matches(
     k = settings.supabase_service_role_key
     hdr = {"apikey": k, "Authorization": f"Bearer {k}"}
     params = {
-        "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,created_at",
+        "select": "id,missing_id,found_id,face_score,text_score,combined_score,status,"
+                  "created_at,family_ack,family_ack_at,family_ack_side",
         "status": f"eq.{status}",
         "order": "combined_score.desc",
         "limit": "1000" if mode != "all" else "400",  # fetch wide, then filter/collapse
@@ -340,6 +341,10 @@ async def admin_list_matches(
     async with httpx.AsyncClient(timeout=15) as cl:
         r = await cl.get(f"{sb}/rest/v1/matches", headers=hdr, params=params)
         matches = r.json() if r.status_code == 200 else []
+        # Bubble family-confirmed matches to the top (stable sort keeps each
+        # group's combined_score.desc order). Only 'yes' jumps the queue — a
+        # family-rejected 'no' must NOT outrank fresh, unreviewed candidates.
+        matches.sort(key=lambda m: m.get("family_ack") != "yes")
         ids = list({m[k2] for m in matches for k2 in ("missing_id", "found_id") if m.get(k2)})
         # Enrich in chunks: a single in.(...) with ~2000 UUIDs overflows the URL.
         reps = {}

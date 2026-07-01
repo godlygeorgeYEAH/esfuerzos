@@ -235,18 +235,21 @@ async def process_photo_for_report(
     photo_url: str,
     app: Any,
     image_bytes: bytes | None = None,
-) -> str | None:
+) -> list[str]:
     """
     Extract a face embedding from photo_url and persist it in Supabase.
 
     Steps:
     1. Run embed_photo_from_url.
-    2. If no face: PATCH photos row with quality_ok=False, return None.
+    2. If no face: PATCH photos row with quality_ok=False, return [].
     3. If face found: PATCH photos row with face_embedding, det_score,
        face_bbox, quality_ok=True.
     4. Trigger _search_face_matches for the opposite report kind.
 
-    Returns the first match_id inserted, or None if no match was found.
+    Returns match_ids inserted, best score first, or [] if no match was found.
+    The top-scored one is not always disclosable (e.g. it may be another
+    family's private report) — callers should try each in order until one
+    clears disclosure, not stop at the first.
     """
     sb_url: str = app.state.supabase_url.rstrip("/")
     sb_key: str = app.state.supabase_service_key
@@ -280,7 +283,7 @@ async def process_photo_for_report(
                     "for report %s photo %s: %s",
                     report_id, photo_url, exc,
                 )
-            return None
+            return []
 
         # Fetch report kind to determine opposite kind for matching.
         try:
@@ -294,11 +297,11 @@ async def process_photo_for_report(
             logger.error(
                 "process_photo_for_report: could not fetch report %s: %s", report_id, exc
             )
-            return None
+            return []
 
         if not rows:
             logger.error("process_photo_for_report: report %s not found", report_id)
-            return None
+            return []
 
         source_kind: str = rows[0].get("kind", "") or "missing"
 
@@ -325,19 +328,18 @@ async def process_photo_for_report(
                 "process_photo_for_report: PATCH failed for report %s photo %s: %s",
                 report_id, photo_url, exc,
             )
-            return None
+            return []
 
     # Search BOTH kinds: the same face is worth surfacing whether the person is
     # listed as missing (another searcher) or found (located). A missing↔missing
     # hit connects two families looking for the same person.
-    first_match: str | None = None
+    match_ids: list[str] = []
     for target_kind in ("missing", "found"):
-        mid = await _search_face_matches(
+        ids = await _search_face_matches(
             report_id, result["embedding"], target_kind, source_kind, sb_url, sb_key
         )
-        if mid and not first_match:
-            first_match = mid
-    return first_match
+        match_ids.extend(ids)
+    return match_ids
 
 
 async def _search_face_matches(
@@ -347,7 +349,7 @@ async def _search_face_matches(
     source_kind: str,
     sb_url: str,
     sb_key: str,
-) -> str | None:
+) -> list[str]:
     """
     Call the match_reports_by_face Supabase RPC, score each candidate,
     and insert qualifying rows into the matches table.
@@ -358,7 +360,8 @@ async def _search_face_matches(
     A match row is inserted only when combined_score >= COMBINED_THRESHOLD.
     All inserted rows get status='pending' (human review required).
 
-    Returns the id of the first match row inserted, or None.
+    Returns the ids of all match rows inserted, in the RPC's similarity-desc
+    order (best score first), or [].
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -379,9 +382,9 @@ async def _search_face_matches(
                 "_search_face_matches: RPC failed for report %s: %s",
                 source_report_id, exc,
             )
-            return None
+            return []
 
-        first_match_id: str | None = None
+        match_ids: list[str] = []
 
         for candidate in candidates:
             candidate_report_id: str = candidate.get("report_id", "")
@@ -422,8 +425,7 @@ async def _search_face_matches(
                     "Match inserted: id=%s missing=%s found=%s face=%.3f combined=%.3f",
                     match_id, missing_id, found_id, face_score, combined_score,
                 )
-                if first_match_id is None:
-                    first_match_id = match_id
+                match_ids.append(match_id)
             except Exception as exc:
                 logger.warning(
                     "_search_face_matches: insert failed for match candidate %s "
@@ -431,4 +433,4 @@ async def _search_face_matches(
                     candidate_report_id, source_report_id, exc,
                 )
 
-        return first_match_id
+        return match_ids

@@ -85,6 +85,14 @@ _searched_shown: set[str] = set()
 # and what to answer. Match claims come ONLY from the real search, never the LLM.
 _skipped: dict[str, set] = defaultdict(set)   # fields the user couldn't answer ("no sé")
 _asked: dict[str, str] = {}                   # the field we asked last turn (per phone)
+
+# Last disclosed match shown to this phone (photo path only — the text-search
+# path doesn't persist a `matches` row synchronously). Lets a bare "sí"/"no"
+# reply be attributed to a specific match for family self-ack (see
+# _handle_family_ack). {"id": match_id, "ts": iso timestamp}. Expires after
+# _ACK_WINDOW_HOURS so an unrelated "no" days later isn't misread as an ack.
+_last_match: dict[str, dict] = {}
+_ACK_WINDOW_HOURS = 72
 _FORM_ASK = ["name", "cedula", "age", "location", "description", "contact"]
 _FORM_Q = {
     "name": "¿Cuál es el nombre completo de la persona? Si no lo sabes, escribe *no sé*.",
@@ -109,6 +117,13 @@ _GREETING = {"hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
 _RESTART = {"nuevo", "registro nuevo", "nuevo registro", "otra persona", "otro",
             "reiniciar", "reset", "nueva busqueda", "nueva busqueda", "empezar de nuevo",
             "registrar", "buscar otra", "buscar a otra"}
+
+# Family self-ack tokens (deaccented+lowercased, matched against body_norm exactly
+# — deliberately narrow so we never mistake normal conversation for an ack).
+_ACK_YES = {"si", "sii", "siii", "s", "confirmo", "es el", "es ella", "sí es",
+            "si es", "es mi hijo", "es mi hija", "esa es", "ese es", "es ella si",
+            "correcto", "asi es"}
+_ACK_NO = {"no", "no es", "no es el", "no es ella", "no era", "no es correcto"}
 _WELCOME = (
     "👋 Hola, soy el asistente de *Reúne VE*. Te ayudo a saber si una persona ya fue "
     "localizada en un hospital o refugio, o a registrar tu búsqueda.\n\n"
@@ -177,6 +192,8 @@ async def _load_session(phone: str) -> None:
         _skipped[phone] = set(st["skipped"])
     if st.get("asked"):
         _asked[phone] = st["asked"]
+    if st.get("last_match"):
+        _last_match[phone] = st["last_match"]
 
 
 async def _save_session(phone: str) -> bool:
@@ -192,6 +209,7 @@ async def _save_session(phone: str) -> bool:
         "searched": phone in _searched_shown,
         "skipped": sorted(_skipped.get(phone, set())),
         "asked": _asked.get(phone),
+        "last_match": _last_match.get(phone),
     }
     try:
         async with httpx.AsyncClient(timeout=6) as cl:
@@ -212,6 +230,12 @@ async def _save_session(phone: str) -> bool:
     return False
 
 
+def _set_last_match(phone: str, match_id: str) -> None:
+    """Record the match_id just disclosed to this phone (in-memory; persisted by
+    the normal _save_session cycle at the end of this turn)."""
+    _last_match[phone] = {"id": match_id, "ts": datetime.now(timezone.utc).isoformat()}
+
+
 def _evict_memory(phone: str) -> None:
     # State is now durable in Supabase; drop the in-memory copies so memory only
     # holds phones being actively processed (B4 — prevents unbounded growth/OOM).
@@ -221,6 +245,7 @@ def _evict_memory(phone: str) -> None:
     _searched_shown.discard(phone)
     _skipped.pop(phone, None)
     _asked.pop(phone, None)
+    _last_match.pop(phone, None)
 
 # Human-readable labels for each scraper source. Shown to families so a match
 # result reads "via Venezuela Reporta" instead of the raw "venezreporta" token.
@@ -776,6 +801,73 @@ async def _lookup_match_details(match_id: str, source_report_id: str) -> dict:
     return {}
 
 
+async def _handle_family_ack(phone: str, ack: str) -> bool:
+    """Consume a pending family self-ack ('yes'/'no') on the last disclosed match.
+
+    This records the family's own claim as a SIGNAL for the human reviewer
+    (matches.family_ack) — it NEVER sets status='confirmed' and never triggers
+    a notification. A human still must approve via /admin/match-review before
+    the match is treated as real; an unsolicited "sí, es mi hijo" is a claim,
+    not proof (fraud/false-hope risk is highest exactly in cases like a
+    missing child). Returns True if there was a pending match to ack (and a
+    reply was sent) — caller should stop processing this message either way."""
+    pending = _last_match.get(phone)
+    if not pending:
+        return False
+    try:
+        ts = datetime.fromisoformat(pending["ts"])
+        if (datetime.now(timezone.utc) - ts).total_seconds() > _ACK_WINDOW_HOURS * 3600:
+            _last_match.pop(phone, None)
+            return False
+    except Exception:
+        _last_match.pop(phone, None)
+        return False
+
+    match_id = pending["id"]
+    sb = settings.supabase_url.rstrip("/")
+    key = settings.supabase_service_role_key
+    hdr = {"apikey": key, "Authorization": f"Bearer {key}"}
+    try:
+        async with httpx.AsyncClient(timeout=8) as cl:
+            mr = await cl.get(f"{sb}/rest/v1/matches", headers=hdr,
+                              params={"id": f"eq.{match_id}", "select": "missing_id,found_id"})
+            rows = mr.json() if mr.status_code == 200 else []
+            if not rows:
+                _last_match.pop(phone, None)
+                return False
+            missing_id = rows[0].get("missing_id")
+            found_id = rows[0].get("found_id")
+            rr = await cl.get(f"{sb}/rest/v1/reports", headers=hdr,
+                              params={"source_url": f"eq.waha:{_report_key(phone)}",
+                                      "order": "created_at.desc", "limit": "1", "select": "id"})
+            r_rows = rr.json() if rr.status_code == 200 else []
+            my_id = r_rows[0]["id"] if r_rows else None
+            side = "missing" if my_id == missing_id else ("found" if my_id == found_id else None)
+            await cl.patch(
+                f"{sb}/rest/v1/matches",
+                headers={**hdr, "Content-Type": "application/json", "Prefer": "return=minimal"},
+                params={"id": f"eq.{match_id}"},
+                json={"family_ack": ack,
+                      "family_ack_at": datetime.now(timezone.utc).isoformat(),
+                      "family_ack_side": side},
+            )
+    except Exception as exc:
+        logger.warning("family_ack patch failed: %s", exc)
+
+    _last_match.pop(phone, None)
+    if ack == "yes":
+        await _waha_send(
+            phone,
+            "Gracias por confirmarnos. Avisamos al equipo de Reúne VE con prioridad "
+            "para que lo verifique cuanto antes.")
+    else:
+        await _waha_send(
+            phone,
+            "Entendido, gracias por avisarnos. Seguimos buscando y te aviso apenas "
+            "aparezca otra coincidencia.")
+    return True
+
+
 async def _upsert_report(phone: str, data: dict, conv_key: str) -> str | None:
     sb = settings.supabase_url.rstrip("/")
     key = settings.supabase_service_role_key
@@ -943,7 +1035,7 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
                     json={"id": str(uuid.uuid4()), "report_id": rid, "storage_path": media_url},
                 )
         if rid:
-            match_id = await process_photo_for_report(rid, media_url, app, image_bytes=image_bytes)
+            match_ids = await process_photo_for_report(rid, media_url, app, image_bytes=image_bytes)
             # Second face engine: reconexión's curated registry (/identificar). Creates
             # pending matches for human review; minor governance handled inside.
             rec_n = 0
@@ -952,23 +1044,27 @@ async def _handle_photo(phone: str, media_url: str, report_id: str | None,
                 rec_n = await reconexion_face.identify_and_store(rid, media_url, app, image_bytes=image_bytes)
             except Exception as exc:  # noqa: BLE001 - never break intake on this
                 logger.warning("reconexion identify (real-time) failed: %s", exc)
-            if match_id:
-                d = await _lookup_match_details(match_id, rid)
-                if d.get("name") or d.get("location"):
-                    nm = d.get("name") or "persona registrada"
-                    src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
-                    url_txt = f"\n{d['url']}" if d.get("url") else ""
-                    locp = f", ubicación: *{d['location']}*" if d.get("location") else ", ubicación por confirmar"
-                    await _waha_send(
-                        phone,
-                        f"Analicé la foto. Hay una *posible* coincidencia facial: *{nm}*{locp}{src_txt}.{url_txt}\n"
-                        "En verificación — Reúne VE confirmará y te contactará.")
-                else:
-                    await _waha_send(
-                        phone,
-                        "Analicé la foto. Hay una posible coincidencia en verificación. "
-                        "El equipo Reúne VE la revisará y te contactará si se confirma.")
-            elif rec_n:
+            # Try each candidate best-score-first: the top score is often another
+            # family's private report (blocked by F7), which used to make the bot
+            # give up entirely instead of offering the next, actionable candidate.
+            disclosed_id, d = None, {}
+            for mid in match_ids:
+                cand = await _lookup_match_details(mid, rid)
+                if cand.get("name") or cand.get("location"):
+                    disclosed_id, d = mid, cand
+                    break
+            if disclosed_id:
+                nm = d.get("name") or "persona registrada"
+                src_txt = f" (via {_source_label(d['source'])})" if d.get("source") else ""
+                url_txt = f"\n{d['url']}" if d.get("url") else ""
+                locp = f", ubicación: *{d['location']}*" if d.get("location") else ", ubicación por confirmar"
+                await _waha_send(
+                    phone,
+                    f"Analicé la foto. Hay una *posible* coincidencia facial: *{nm}*{locp}{src_txt}.{url_txt}\n"
+                    "En verificación — Reúne VE confirmará y te contactará.\n\n"
+                    "Si esta persona es tu familiar, respóndenos *SI*. Si no es, respóndenos *NO*.")
+                _set_last_match(phone, disclosed_id)
+            elif match_ids or rec_n:
                 await _waha_send(
                     phone,
                     "Analicé la foto. Hay una posible coincidencia en verificación. "
@@ -1030,6 +1126,7 @@ def _reset_form(phone: str) -> None:
     _searched_shown.discard(phone)
     _skipped.pop(phone, None)
     _asked.pop(phone, None)
+    _last_match.pop(phone, None)
 
 
 def _field_ok(phone: str, st: dict, field: str, kind: str, has_media: bool) -> bool:
@@ -1220,6 +1317,22 @@ async def _process_message(payload: dict, phone: str, app: Any) -> None:
         _conv_state[phone].append({"role": "assistant", "content": _WELCOME})
         await _waha_send(phone, _WELCOME)
         return
+
+    # Family self-ack: a bare "sí"/"no" replying to a just-disclosed match. Only
+    # fires when a match was actually shown to this phone (_last_match). A bare
+    # "si"/"no" is ambiguous while the form still has a pending field (it may
+    # mean "skip this field", e.g. "no" for "¿tienes su cédula?") — only treat
+    # those as an ack once the form is already complete; unambiguous phrases
+    # ("no es", "confirmo", ...) always count regardless of form state.
+    if body and not has_media and phone in _last_match:
+        st_prev = _collected.get(phone, {})
+        kind_prev = st_prev.get("kind") or "missing"
+        form_pending = _next_field(phone, st_prev, kind_prev, False) is not None
+        bare = body_norm in {"si", "s", "no"}
+        if not (bare and form_pending):
+            ack = "yes" if body_norm in _ACK_YES else ("no" if body_norm in _ACK_NO else None)
+            if ack and await _handle_family_ack(phone, ack):
+                return
 
     # Track message in conversation history
     if body:
