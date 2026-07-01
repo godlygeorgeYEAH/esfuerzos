@@ -1,0 +1,24 @@
+name: Diagnose VPS layout
+
+on:
+  push:
+    branches:
+      - claude/vps-deployment-setup-7g27ty
+    paths:
+      - diagnose.trigger
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSHPASS: ${{ secrets.VPS_SSH_PASSWORD }}
+      SSH_HOST: '13.140.166.72'
+      SSH_USER: 'root'
+    steps:
+      - name: Instalar sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+      - name: Inspeccionar VPS
+        run: |
+          echo "::add-mask::$SSHPASS"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 "${SSH_USER}@${SSH_HOST}" \
+            'set +e; echo "== whoami =="; whoami; echo "== ls -la /root =="; ls -la /root; echo "== ls -la /root/reune =="; ls -la /root/reune; echo "== .git bajo /root (depth3) =="; find /root -maxdepth 3 -name .git; echo "== compose files bajo /root (depth3) =="; find /root -maxdepth 3 -name docker-compose.yml -o -name docker-compose.yaml -o -name compose.yml -o -name compose.yaml; echo "== repos git encontrados =="; for d in $(find /root -maxdepth 3 -name .git); do r=$(dirname "$d"); echo "repo: $r"; git -C "$r" remote -v; git -C "$r" branch --show-current; done; echo "== docker ps =="; docker ps'
